@@ -202,15 +202,54 @@ dan `06` (visualisasi) **belum dibahas sama sekali** — jangan diasumsikan
 desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
 
 ### Urutan kerja yang disarankan untuk sesi berikutnya:
-1. Implementasi `pipeline/expanding_features.py` (closed-form vectorized).
-2. **Validasi wajib**: bandingkan hasil closed-form vs naive loop di subset
-   kecil data, pastikan identik sebelum lanjut.
-3. `pipeline/dataset_builder.py` — generate training samples per pixel,
-   terapkan gap-skip rule (§4).
-4. `pipeline/model_training.py` — `stratified_monthly_split` + training 3
+1. ✅ **SELESAI** — `pipeline/expanding_features.py` (closed-form vectorized).
+2. ✅ **SELESAI** — Validasi closed-form vs naive loop (`scripts/tools/validate_expanding_features.py`),
+   identik dalam toleransi floating point, ~38x lebih cepat di test 12.798 window.
+3. ✅ **SELESAI** — `pipeline/dataset_builder.py` — generate training samples per
+   pixel, terapkan gap-skip rule (§4). Divalidasi pakai file `.nc` sintetis
+   (grid 5x7, gap file hilang + gap cloud-mask NaN disengaja) — cross-check
+   manual numpy match persis, gap-skip rule dibuktikan nggak ada anchor yang
+   overlap posisi NaN. Lihat §12 untuk keputusan desain yang diambil di sini.
+4. **BELUM** — `pipeline/model_training.py` — `stratified_monthly_split` + training 3
    model.
-5. `pipeline/recursive_eval.py` — evaluasi recursive per t0, hitung MAE per
+5. **BELUM** — `pipeline/recursive_eval.py` — evaluasi recursive per t0, hitung MAE per
    step.
+
+---
+
+## 12. Keputusan Desain Tambahan (dari sesi implementasi `dataset_builder.py`)
+
+Bagian ini belum ada di draft desain awal, diputuskan pas implementasi
+karena nggak ada preseden/reference code (`03a_build_features.py` versi
+lama TIDAK ada di GitHub `CTT-Forecasting`, cuma ada `01_download_data.py`
+di sana — kemungkinan sisanya cuma lokal, nggak pernah di-push).
+
+- **Sumber data**: `dataset_builder.py` baca langsung banyak file
+  `subset_*.nc` di `data_bandung/` (bukan ada tahap ekstraksi CSV
+  perantara). Timestamp diambil dari nama file pakai
+  `extract_time_from_filename()` yang udah ada di `netcdf_tools.py`.
+- **Definisi pixel**: grid Bandung ~5×7 = 35 pixel (lat×lon), diberi
+  `pixel_id` format `"{lat_idx}_{lon_idx}"`.
+- **Channel yang dipakai**: HANYA `tbb_13` (sesuai target column §8) —
+  TIDAK pakai channel lain (`tbb_07`..`tbb_16`) sebagai fitur tambahan,
+  karena CLAUDE.md desain awal cuma bahas window stats dari satu series `y`.
+- **Anchor stride = 1** (default): setiap posisi start yang lolos gap-skip
+  rule dipakai jadi anchor (window growing dari situ). Bisa diubah lewat
+  parameter `anchor_stride` di `build_dataset()` kalau dataset hasil full
+  run ternyata kegedean / terlalu redundant antar anchor yang overlap.
+- **Grid pixel diasumsikan konsisten** bentuknya (shape sama) antar semua
+  file. Grid canonical diambil dari file valid pertama yang dibaca; file
+  lain yang shape-nya menyimpang dari itu dianggap **gap penuh di semua
+  pixel** untuk timestamp tsb (bukan di-reshape paksa atau bikin crash).
+- **Bug yang ketemu & fix penting**: `np.cumsum` mem-propagate `NaN` — satu
+  NaN di time series bikin SEMUA cumsum setelah posisi itu ikut NaN, walau
+  window yang di-query nggak menyentuh posisi NaN tsb. Fix: `y` di-
+  `np.nan_to_num(nan=0.0)` dulu SEBELUM masuk `compute_cumsum_stats()`. Ini
+  aman karena `find_valid_anchors()` sudah menjamin window manapun yang
+  lolos gap-skip rule nggak pernah menyentuh posisi NaN — jadi nilai
+  pengganti 0 nggak pernah ikut kehitung di window valid manapun. `y` asli
+  (dengan NaN utuh) tetap dipakai untuk `first_value`/`last_value`/min-max
+  (aman karena posisi yang di-index dijamin bukan NaN).
 
 ---
 

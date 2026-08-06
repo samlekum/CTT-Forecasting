@@ -67,6 +67,37 @@ class Config:
     LAG_COUNT = 6
     assert LAG_COUNT >= 3, "LAG_COUNT minimal 3 -- fitur delta/accel butuh tbb_13_t/tm1/tm2."
 
+    # ------------------------------------------------------------------
+    # Konfigurasi khusus EXPANDING WINDOW (project ini -- lihat CLAUDE.md
+    # §2-3, §12). Dipakai oleh expanding_features.py & dataset_builder.py.
+    # Beda dari LAG_COUNT/INTERVALS_MINUTES di atas yang merupakan skema
+    # fixed sliding window punya repo lama (dibiarkan ada di sini kalau ada
+    # script yang di-reuse apa adanya, tapi TIDAK dipakai expanding window).
+    # ------------------------------------------------------------------
+
+    # Channel target satu-satunya yang dipakai sebagai time series `y`
+    # untuk window expanding. TIDAK multi-channel -- lihat CLAUDE.md §8.
+    TARGET_CHANNEL = "tbb_13"
+
+    # Ukuran window awal (IS1 = 6 titik) & jumlah step horizon (OS1..OS18).
+    # Ubah di sini SAJA kalau mau ubah skema window -- otomatis konsisten
+    # di dataset_builder.py. PENTING: mengubah nilai ini mengubah definisi
+    # anchor span (rentang wajib bebas-gap untuk gap-skip rule §4) dan
+    # jumlah sample per anchor, jadi dataset hasil build_dataset() yang
+    # lama harus di-rebuild ulang setelah diubah.
+    MIN_WINDOW_SIZE = 6
+    HORIZON_STEPS = 18
+
+    # Direktori & nama file default output dataset training expanding window.
+    EXPANDING_DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
+    EXPANDING_DATASET_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_features.csv")
+
+    # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
+    # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
+    # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run
+    # ternyata kegedean -- lihat CLAUDE.md §12.
+    ANCHOR_STRIDE_DEFAULT = 1
+
     @classmethod
     def validate(cls):
         """Validasi semua env var wajib terisi, dan laporkan nama-nama yang belum diisi."""

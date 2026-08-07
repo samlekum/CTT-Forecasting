@@ -253,7 +253,7 @@ def build_pixel_samples(y, anchors, pixel_id, pixel_lat, pixel_lon, timeline):
     return df
 
 
-def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None):
+def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None, max_files=None):
     """Fungsi utama: baca semua file NetCDF di `data_dir`, generate dataset
     training expanding window untuk semua pixel, gabung jadi satu DataFrame.
 
@@ -273,6 +273,15 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
     freq_minutes : int, optional
         Resolusi timeline. Default None -> pakai `Config.FREQ_MINUTES`
         (10 menit, sesuai Himawari).
+    max_files : int, optional
+        Kalau diisi, cuma pakai `max_files` file PERTAMA secara kronologis
+        (bukan random) -- buat smoke-test cepat di subset kecil sebelum
+        full run, sesuai kebiasaan kerja CLAUDE.md §11 (`03a_build_features.py`
+        di repo lama makan 10 jam+ karena langsung full-run tanpa validasi
+        subset dulu). Default None = pakai semua file (perilaku produksi).
+        CATATAN: karena dipotong secara kronologis dari awal, anchor dekat
+        ujung potongan bakal ke-skip otomatis oleh gap-skip rule (§4) --
+        ini WAJAR untuk smoke-test, bukan bug.
 
     Return
     ------
@@ -289,6 +298,10 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
     entries = discover_nc_files(data_dir)
     if not entries:
         raise ValueError(f"Tidak ada file subset_*.nc ditemukan di {data_dir}")
+
+    if max_files is not None:
+        entries = entries[:max_files]
+        logging.info(f"Mode smoke-test: hanya pakai {len(entries)} file pertama (dari max_files={max_files}).")
 
     timeline = build_uniform_timeline(entries, freq_minutes=freq_minutes)
     data_matrix, pixel_meta = load_pixel_grid(entries, timeline)

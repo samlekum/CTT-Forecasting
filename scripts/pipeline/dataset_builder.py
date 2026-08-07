@@ -29,6 +29,7 @@ from pipeline.expanding_features import (
     compute_expanding_window_features,
     FEATURE_COLUMNS,
 )
+from ui.terminal_display import make_progress_bar, say_info
 
 TARGET_CHANNEL = Config.TARGET_CHANNEL
 TARGET_COLUMN = f"target_{TARGET_CHANNEL}"
@@ -116,7 +117,11 @@ def load_pixel_grid(entries, timeline):
     n_mismatched = 0
     n_missing_channel = 0
 
-    for ts, path in entries:
+    # Loop I/O paling berat di seluruh Tahap 2 (baca ratusan/ribuan file
+    # NetCDF satu-satu) -- WAJIB ada progress bar biar keliatan jalan,
+    # bukan cuma diem. Pakai make_progress_bar (style sama kayak Tahap 1).
+    progress = make_progress_bar(entries, desc="Baca NetCDF", unit="file")
+    for ts, path in progress:
         t_idx = timeline_index.get(ts)
         if t_idx is None:
             # Timestamp di luar rentang timeline (seharusnya nggak terjadi
@@ -303,14 +308,21 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
         entries = entries[:max_files]
         logging.info(f"Mode smoke-test: hanya pakai {len(entries)} file pertama (dari max_files={max_files}).")
 
+    say_info(f"Total file .nc yang akan dibaca: {len(entries)}")
+
     timeline = build_uniform_timeline(entries, freq_minutes=freq_minutes)
     data_matrix, pixel_meta = load_pixel_grid(entries, timeline)
 
     all_samples = []
-    for p in range(data_matrix.shape[1]):
+    total_anchors = 0
+    n_pixels = data_matrix.shape[1]
+    pixel_progress = make_progress_bar(range(n_pixels), desc="Proses pixel", unit="pixel")
+    for p in pixel_progress:
         y = data_matrix[:, p]
         valid_mask = ~np.isnan(y)
         anchors = find_valid_anchors(valid_mask, span=ANCHOR_SPAN, stride=anchor_stride)
+        total_anchors += len(anchors)
+        pixel_progress.set_postfix_str(f"anchor={total_anchors}")
 
         row = pixel_meta.iloc[p]
         df_pixel = build_pixel_samples(

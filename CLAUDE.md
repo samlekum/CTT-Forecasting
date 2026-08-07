@@ -171,8 +171,10 @@ ctt-forecasting-expanding/
 ├── CLAUDE.md                        # dokumen ini
 ├── scripts/
 │   ├── 01_download_data.py          # REUSE apa adanya dari repo lama, TIDAK diubah
-│   ├── 02_build_expanding_features.py  # BELUM -- lihat §10
-│   ├── 03_train_models.py           # ✅ SELESAI -- xgboost, lightgbm, catboost
+│   ├── 02_build_expanding_features.py  # ✅ SELESAI -- CLI + smoke-test mode
+│   │                                 # (--max-files), progress bar per-file & per-pixel (§14)
+│   ├── 03_train_models.py           # ✅ SELESAI -- xgboost, lightgbm, catboost,
+│   │                                 # progress bar per-model (§14)
 │   ├── 04_recursive_evaluate.py     # BELUM -- lihat §10
 │   ├── 05_run_inference.py          # BELUM dibahas -- sesi berikutnya
 │   ├── 06_visualize.py              # BELUM dibahas -- sesi berikutnya
@@ -208,10 +210,17 @@ ctt-forecasting-expanding/
 
 ## 10. Scope Sesi Berikutnya
 
-Fokus sesi berikutnya: **02 → 03 → 04 saja** (build features → train →
-recursive evaluate). `01` tinggal disalin dari repo lama. `05` (inference)
-dan `06` (visualisasi) **belum dibahas sama sekali** — jangan diasumsikan
-desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
+**KOREKSI (sesi ini)**: draft sebelumnya nulis `02_build_expanding_features.py`
+"BELUM" di §9 -- itu KELIRU, file itu udah ada & udah di-commit dari sesi
+sebelumnya (lihat poin 3 di daftar bawah). Fokus sesi berikutnya sekarang
+tinggal **04 (`recursive_eval.py`) saja**, lanjut ke `05`/`06` yang emang
+belum pernah dibahas desainnya.
+
+Fokus sesi ini + berikutnya: **02 → 03 (sudah selesai) → 04** (build
+features → train → recursive evaluate). `01` tinggal disalin dari repo
+lama. `05` (inference) dan `06` (visualisasi) **belum dibahas sama sekali**
+— jangan diasumsikan desainnya, harus didiskusikan dulu di sesi terpisah
+sebelum dikoding.
 
 ### Urutan kerja yang disarankan untuk sesi berikutnya:
 1. ✅ **SELESAI** — `pipeline/expanding_features.py` (closed-form vectorized).
@@ -236,6 +245,44 @@ desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
    jalan, model tersimpan valid. Lihat §13 untuk detail keputusan desain.
 5. **BELUM** — `pipeline/recursive_eval.py` — evaluasi recursive per t0, hitung MAE per
    step.
+
+---
+
+## 14. Keputusan Desain Tambahan (sesi penambahan progress bar)
+
+Diminta Dhika: `02` dan `03` dikasih progress bar biar keliatan jalan,
+konsisten sama pengalaman `01` (yang punya per-file download bar dari
+`ftp_client.download_with_progress`). Perubahan:
+
+- **`ui/terminal_display.py`**: tambah `make_progress_bar(iterable, desc,
+  unit)` -- generalisasi dari `make_total_progress_bar` yang sudah ada
+  (yang itu spesifik untuk kata "file" dan sebenarnya belum pernah dipanggil
+  di `01_download_data.py`, cuma di-import). `make_progress_bar` dipakai di
+  tempat baru (bukan gantiin yang lama), style bar tetep konsisten (tqdm,
+  `ncols=80`, `tqdm.write` untuk log biar nggak tabrakan sama bar).
+- **`pipeline/dataset_builder.py`** (dipanggil dari `02`): 2 progress bar
+  ditambahkan --
+  1. `load_pixel_grid()`: loop baca file NetCDF satu-satu (`xr.open_dataset`)
+     -- ini I/O paling berat di Tahap 2 kalau file ribuan, jadi paling
+     penting buat kasih progress bar (desc "Baca NetCDF", unit "file").
+  2. `build_dataset()`: loop per-pixel (biasanya cuma puluhan pixel, jadi
+     bar-nya cepet selesai, tapi tetep dikasih + `set_postfix_str` nunjukin
+     running total anchor ketemu, biar user tau proses gap-skip rule lagi
+     ngapain).
+- **`pipeline/model_training.py`** (dipanggil dari `03`): loop
+  `Config.MODEL_NAMES` di `train_all_models()` dikasih progress bar (desc
+  "Training model", unit "model") + `say_info`/`say_ok`/`say_error` per
+  model (mulai training, selesai dengan MAE/RMSE/R2, atau error kalau
+  library belum terinstall) -- pola yang sama kayak `say_download`/`say_ok`
+  per-file di `01`.
+- **Divalidasi** pakai file `.nc` sintetis (6 pixel, 30 timestamp, tanpa
+  gap) end-to-end: `build_dataset()` → dataset 756 baris → `train_all_models()`
+  → model `.joblib` + `training_summary.csv` (dicoba pakai LightGBM asli,
+  MAE ~0.4K di data sintetis -- angka ini nggak representatif, cuma buat
+  mastiin pipeline nggak crash). Progress bar tampil normal di kedua tahap,
+  tidak ada tabrakan output sama `say_*()`.
+- Tidak ada perubahan logika inti (fitur, gap-skip, split, training) --
+  murni penambahan visibilitas progres.
 
 ---
 

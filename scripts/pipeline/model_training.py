@@ -18,6 +18,7 @@ import pandas as pd
 
 from pipeline.config import Config
 from pipeline.expanding_features import FEATURE_COLUMNS
+from ui.terminal_display import make_progress_bar, say_info, say_ok, say_error
 
 TARGET_COLUMN = f"target_{Config.TARGET_CHANNEL}"
 
@@ -212,15 +213,28 @@ def train_all_models(df, models_dir=None, test_frac=None):
     train_df, test_df, cutoffs = stratified_monthly_split(df, test_frac=test_frac)
     X_train, y_train = get_feature_target(train_df)
     X_test, y_test = get_feature_target(test_df)
+    say_info(f"Split selesai -- train: {len(train_df)} baris, test: {len(test_df)} baris "
+             f"({len(cutoffs)} bulan).")
 
     summary_rows = []
-    for model_name in Config.MODEL_NAMES:
+    # Progress bar per-model -- training XGBoost/LightGBM/CatBoost bisa makan
+    # waktu beberapa menit tergantung ukuran dataset, jadi WAJIB keliatan
+    # progresnya (style sama kayak Tahap 1/2), bukan cuma diem nunggu.
+    model_progress = make_progress_bar(Config.MODEL_NAMES, desc="Training model", unit="model")
+    for model_name in model_progress:
+        model_progress.set_postfix_str(model_name)
+        say_info(f"Mulai training: {model_name} ...")
         try:
             model, elapsed = train_one_model(model_name, X_train, y_train)
             metrics = evaluate(model, X_test, y_test)
 
             model_path = os.path.join(models_dir, f"{model_name}.joblib")
             joblib.dump(model, model_path)
+
+            say_ok(
+                f"{model_name} selesai ({elapsed:.1f}s) -- "
+                f"MAE={metrics['mae']:.4f}K RMSE={metrics['rmse']:.4f}K R2={metrics['r2']:.4f}"
+            )
 
             summary_rows.append({
                 "model": model_name,
@@ -232,6 +246,7 @@ def train_all_models(df, models_dir=None, test_frac=None):
                 "r2": metrics["r2"],
             })
         except ImportError as e:
+            say_error(f"{model_name} dilewati -- library belum terinstall: {e}")
             summary_rows.append({
                 "model": model_name, "n_train": len(train_df), "n_test": len(test_df),
                 "waktu_training_detik": None, "mae": None, "rmse": None, "r2": None,

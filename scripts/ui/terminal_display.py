@@ -74,3 +74,17 @@ def make_total_progress_bar(files):
         bar_format="{desc} |{bar}| {n_fmt}/{total_fmt} file [{elapsed}<{remaining}]",
         ncols=80,
     )
+
+def make_progress_bar(iterable, desc="Proses", unit="item"):
+    """Progress bar generik dengan style konsisten dengan make_total_progress_bar,
+    tapi unit/desc bisa disesuaikan -- dipakai di luar konteks download file
+    (mis. loop per-pixel di dataset_builder.py, loop per-model di
+    model_training.py). Pakai bareng say_*() (tqdm.write) supaya log tidak
+    tabrakan dengan bar yang lagi jalan.
+    """
+    return tqdm(
+        iterable,
+        desc=desc,
+        bar_format="{desc} |{bar}| {n_fmt}/{total_fmt} " + unit + " [{elapsed}<{remaining}]",
+        ncols=80,
+    )

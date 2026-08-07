@@ -97,6 +97,15 @@ class Config:
     EXPANDING_DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
     EXPANDING_DATASET_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_features.csv")
 
+    # Direktori output model hasil training (Tahap 3) & ringkasan metrik.
+    # Dipakai model_training.py / 03_train_models.py. Path model per-model:
+    # {EXPANDING_MODELS_DIR}/{model_name}.joblib. Ringkasan metrik gabungan:
+    # {EXPANDING_MODELS_DIR}/training_summary.csv
+    EXPANDING_MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+
+    # Fraksi test default untuk stratified_monthly_split() di Tahap 3.
+    TEST_FRAC = 0.15
+
     # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
     # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
     # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run

@@ -7,9 +7,10 @@ repo **`CTT-Forecasting-Expanding`**. Baca ini SEBELUM mulai ngoding apapun.
 
 ## 1. Konteks & Kenapa Repo Ini Ada
 
-Ini adalah **project baru, terpisah total** dari repo lama `CTT-Forecasting`
-(https://github.com/samlekum/CTT-Forecasting). Repo lama TIDAK diubah/disentuh
-oleh project ini — anggap read-only reference.
+Ini adalah **project baru, terpisah total** dari repo lama
+`Bandung-Weather-Forecast-Himawari-09`
+(https://github.com/nugrahsdhka/Bandung-Weather-Forecast-Himawari-09). Repo
+lama TIDAK diubah/disentuh oleh project ini — anggap read-only reference.
 
 Alasan dibuat terpisah: dosen pembimbing Dhika meminta metode recursive
 forecasting dengan skema **expanding window**, yang secara fundamental beda
@@ -166,28 +167,39 @@ bukan format yang kaku.
 ctt-forecasting-expanding/
 ├── .env.example
 ├── .gitignore
-├── README.md
+├── README.md                        # BELUM DIBUAT -- ada di rencana awal, belum eksis
 ├── CLAUDE.md                        # dokumen ini
 ├── scripts/
 │   ├── 01_download_data.py          # REUSE apa adanya dari repo lama, TIDAK diubah
-│   ├── 02_build_expanding_features.py
-│   ├── 03_train_models.py           # xgboost, lightgbm, catboost
-│   ├── 04_recursive_evaluate.py
+│   ├── 02_build_expanding_features.py  # BELUM -- lihat §10
+│   ├── 03_train_models.py           # ✅ SELESAI -- xgboost, lightgbm, catboost
+│   ├── 04_recursive_evaluate.py     # BELUM -- lihat §10
 │   ├── 05_run_inference.py          # BELUM dibahas -- sesi berikutnya
 │   ├── 06_visualize.py              # BELUM dibahas -- sesi berikutnya
 │   ├── pipeline/
-│   │   ├── config.py
+│   │   ├── config.py                # terpusat: FTP, path, LAG_COUNT (lama),
+│   │   │                             # MIN_WINDOW_SIZE/HORIZON_STEPS/TARGET_CHANNEL/
+│   │   │                             # EXPANDING_MODELS_DIR/TEST_FRAC (expanding window)
 │   │   ├── ftp_client.py            # reuse dari repo lama
 │   │   ├── netcdf_tools.py          # reuse dari repo lama
 │   │   ├── file_tracker.py          # reuse dari repo lama
 │   │   ├── telegram_notifier.py     # reuse dari repo lama
 │   │   ├── expanding_features.py    # BARU -- closed-form vectorized engine (lihat §3)
 │   │   ├── dataset_builder.py       # BARU -- generator sample IS/OS per pixel, gap-aware
-│   │   ├── model_training.py        # BARU -- stratified_monthly_split + 3 model
-│   │   ├── recursive_eval.py        # BARU
+│   │   ├── validate_expanding_features.py  # BARU -- validasi closed-form vs naive.
+│   │   │                             # CATATAN: file ini ada di scripts/pipeline/, BUKAN
+│   │   │                             # scripts/tools/ seperti draft awal §9/§10 -- kalau
+│   │   │                             # mau samain struktur sama repo lama, tinggal
+│   │   │                             # dipindah, belum dilakukan.
+│   │   ├── model_training.py        # ✅ SELESAI -- stratified_monthly_split (reuse
+│   │   │                             # verbatim dari repo lama, time_col="anchor_t0") +
+│   │   │                             # training 3 model + save .joblib + training_summary.csv
+│   │   ├── recursive_eval.py        # BELUM
 │   │   ├── inference.py             # BELUM dibahas
 │   │   └── utils.py
-│   ├── tools/                       # diagnostic scripts, pola serupa repo lama
+│   ├── tools/                       # diagnostic scripts, pola serupa repo lama -- KOSONG
+│   │                                 # untuk expanding window (validate_expanding_features.py
+│   │                                 # justru ada di pipeline/, lihat catatan di atas)
 │   └── ui/
 │       └── terminal_display.py      # reuse dari repo lama
 ```
@@ -203,15 +215,25 @@ desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
 
 ### Urutan kerja yang disarankan untuk sesi berikutnya:
 1. ✅ **SELESAI** — `pipeline/expanding_features.py` (closed-form vectorized).
-2. ✅ **SELESAI** — Validasi closed-form vs naive loop (`scripts/tools/validate_expanding_features.py`),
-   identik dalam toleransi floating point, ~38x lebih cepat di test 12.798 window.
+2. ✅ **SELESAI** — Validasi closed-form vs naive loop
+   (`scripts/pipeline/validate_expanding_features.py` — CATATAN: path aslinya
+   direncanakan `scripts/tools/`, tapi implementasi aktual naruhnya di
+   `scripts/pipeline/`, lihat §9), identik dalam toleransi floating point,
+   ~38x lebih cepat di test 12.798 window.
 3. ✅ **SELESAI** — `pipeline/dataset_builder.py` — generate training samples per
    pixel, terapkan gap-skip rule (§4). Divalidasi pakai file `.nc` sintetis
    (grid 5x7, gap file hilang + gap cloud-mask NaN disengaja) — cross-check
    manual numpy match persis, gap-skip rule dibuktikan nggak ada anchor yang
    overlap posisi NaN. Lihat §12 untuk keputusan desain yang diambil di sini.
-4. **BELUM** — `pipeline/model_training.py` — `stratified_monthly_split` + training 3
-   model.
+4. ✅ **SELESAI** — `pipeline/model_training.py` + `scripts/03_train_models.py` —
+   `stratified_monthly_split()` di-reuse VERBATIM dari repo lama (cuma
+   `time_col` diganti jadi `"anchor_t0"`), training 3 model (xgboost/
+   lightgbm/catboost, SVR di-drop sesuai §5), save `.joblib` +
+   `training_summary.csv` ke `Config.EXPANDING_MODELS_DIR` (baru,
+   tersentralisasi di config.py). Divalidasi pakai dataset sintetis 3
+   bulan: cutoff per-bulan bekerja (semua bulan punya representasi di
+   test set, bukan 0% kayak masalah repo lama), training end-to-end
+   jalan, model tersimpan valid. Lihat §13 untuk detail keputusan desain.
 5. **BELUM** — `pipeline/recursive_eval.py` — evaluasi recursive per t0, hitung MAE per
    step.
 
@@ -230,10 +252,22 @@ desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
 
 ## 12. Keputusan Desain Tambahan (dari sesi implementasi `dataset_builder.py`)
 
-Bagian ini belum ada di draft desain awal, diputuskan pas implementasi
-karena nggak ada preseden/reference code (`03a_build_features.py` versi
-lama TIDAK ada di GitHub `CTT-Forecasting`, cuma ada `01_download_data.py`
-di sana — kemungkinan sisanya cuma lokal, nggak pernah di-push).
+Bagian ini belum ada di draft desain awal, diputuskan pas implementasi.
+
+**KOREKSI (sesi berikutnya)**: kalimat asli di sini bilang "nggak ada
+preseden/reference code karena `03a_build_features.py` TIDAK ada di
+GitHub". Itu KELIRU — repo lama yang dicek sebelumnya salah URL (lihat
+koreksi §1). Repo lama yang benar
+(https://github.com/nugrahsdhka/Bandung-Weather-Forecast-Himawari-09)
+justru punya pipeline LENGKAP yang udah di-push: `03a_build_features.py`,
+`pipeline/feature_engineering.py`, `pipeline/spatial_features.py`,
+`04_train_models.py`, `pipeline/model_training.py`,
+`05_recursive_evaluation.py`, `pipeline/recursive_eval.py`, plus
+`tools/check_seasonal_distribution.py` dkk. Keputusan desain di bawah ini
+TETAP VALID (sudah divalidasi manual terpisah, lihat CLAUDE.md §10 &
+riwayat sesi), tapi kalau ada sesi berikutnya yang perlu preseden buat
+modul lain (mis. `inference.py`, `visualize.py`), CEK DULU implementasi
+yang sepadan di repo lama yang benar sebelum desain dari nol.
 
 - **Sumber data**: `dataset_builder.py` baca langsung banyak file
   `subset_*.nc` di `data_bandung/` (bukan ada tahap ekstraksi CSV
@@ -261,5 +295,44 @@ di sana — kemungkinan sisanya cuma lokal, nggak pernah di-push).
   pengganti 0 nggak pernah ikut kehitung di window valid manapun. `y` asli
   (dengan NaN utuh) tetap dipakai untuk `first_value`/`last_value`/min-max
   (aman karena posisi yang di-index dijamin bukan NaN).
+
+---
+
+## 13. Keputusan Desain Tambahan (dari sesi implementasi `model_training.py`)
+
+- **`stratified_monthly_split()` reuse verbatim** dari repo lama (lihat
+  koreksi §1/§12 -- fungsinya ada di `pipeline/model_training.py` repo
+  lama). Logikanya sudah generic (`time_col` parameterized), jadi TIDAK
+  ada modifikasi logika, cuma dipanggil dengan `time_col="anchor_t0"`
+  (bukan `"base_time"` seperti skema fixed-window repo lama).
+- **Fitur training**: HANYA 9 kolom `FEATURE_COLUMNS` dari
+  `expanding_features.py` (§3) -- TIDAK ditambah `lat`/`lon`/`hour_sin`
+  dkk seperti `FEATURE_COLUMNS` di repo lama, karena desain awal §3
+  eksplisit cuma nyebut 9 kolom itu sebagai fitur final. `n_points` di
+  antara 9 kolom itu berfungsi implisit sebagai penanda step (n_points =
+  MIN_WINDOW_SIZE + step - 1), jadi model tetap tahu "sejauh apa" window
+  tanpa perlu kolom step eksplisit.
+- **Model disimpan sebagai `.joblib`** (bukan pickle biasa) ke
+  `Config.EXPANDING_MODELS_DIR` (baru, ditambahkan ke config.py di sesi
+  ini) -- path `{model_name}.joblib`, TIDAK per-interval/per-folder
+  seperti repo lama (project ini cuma punya satu skema window, beda dari
+  repo lama yang punya banyak `INTERVALS_MINUTES`).
+- **Evaluasi di `model_training.py` sengaja basic** (MAE/RMSE/R2 di
+  seluruh test set tercampur semua step) -- BUKAN evaluasi per-step.
+  Evaluasi per-step 1..18 itu scope `recursive_eval.py` (Tahap 04, belum
+  dikerjakan), sesuai keputusan diskusi (jangan digabung ke
+  `model_training.py`).
+- **`noise injection` (fix #3 di repo lama) TIDAK di-port** ke sini --
+  belum ada kebutuhan/keputusan buat itu di expanding window, dan bukan
+  bagian dari scope §5-§8. Kalau nanti dibutuhkan (mis. setelah lihat
+  hasil `recursive_eval.py`), diskusikan dulu sebelum ditambah.
+- **Test coverage sebelum dianggap aman**: dataset sintetis 3 bulan (Jan-
+  Mar 2024, 5000 baris) dipakai buat verifikasi `stratified_monthly_split`
+  menghasilkan representasi test di SEMUA bulan (bukan 0% di bulan
+  tertentu), lalu `train_all_models()` dijalankan end-to-end sampai
+  model `.joblib` + `training_summary.csv` ke-generate dengan benar.
+  BELUM divalidasi ke dataset asli hasil `dataset_builder.py` (karena
+  `02_build_expanding_features.py` belum ada) -- WAJIB dicoba di data
+  asli sebelum dianggap final produksi.
 
 ---

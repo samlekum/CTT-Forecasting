@@ -10,6 +10,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 from expanding_features import compute_expanding_window_features, compute_cumsum_stats
+from config import Config
 
 
 def naive_window_stats(y, starts, ends):
@@ -54,12 +55,23 @@ def naive_window_stats(y, starts, ends):
     return {k: np.array(v, dtype=np.float64) for k, v in results.items()}
 
 
-def generate_anchors(n_series, horizon_start=6, horizon_steps=18):
+def generate_anchors(n_series, horizon_start=None, horizon_steps=None):
     """Generate starts/ends ala CLAUDE.md §2: tiap anchor mulai dari
     beberapa titik awal berbeda, window tumbuh 1 titik per step, horizon
     18 step. Anchor2 dibuat dari berbagai posisi start supaya test
     mencakup banyak kombinasi s berbeda (bukan cuma s=0).
+
+    horizon_start / horizon_steps : optional, default None -> ambil dari
+    `Config.MIN_WINDOW_SIZE` / `Config.HORIZON_STEPS`. SEBELUMNYA hardcoded
+    6/18 di sini, terpisah dari config.py -- artinya kalau MIN_WINDOW_SIZE
+    atau HORIZON_STEPS diubah di config, validasi ini diam-diam tetap
+    nge-test skema window yang lama (false confidence). Sekarang selalu
+    ngetest skema yang lagi aktif di Config.
     """
+    if horizon_start is None:
+        horizon_start = Config.MIN_WINDOW_SIZE
+    if horizon_steps is None:
+        horizon_steps = Config.HORIZON_STEPS
     starts_all, ends_all = [], []
     # anchor bisa mulai dari t0 mana saja, selama masih cukup ruang untuk
     # horizon_start titik awal + horizon_steps step ke depan

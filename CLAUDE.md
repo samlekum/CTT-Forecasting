@@ -217,6 +217,17 @@ desainnya, harus didiskusikan dulu di sesi terpisah sebelum dikoding.
 
 ---
 
+## 11. Kebiasaan Kerja (Berlaku Sama Seperti Repo Lama)
+
+- Komunikasi santai, Bahasa Indonesia informal.
+- Progress step-by-step, bukan sekaligus semua — konfirmasi dulu sebelum
+  ngoding bagian besar.
+- Kalau ada operasi berat (build features skala penuh, training penuh),
+  **jangan langsung full-run** tanpa validasi di subset kecil dulu — belajar
+  dari `03a_build_features.py` yang makan 10 jam+ di repo lama.
+- Update dokumen ini kalau ada keputusan desain baru supaya sesi berikutnya
+  nggak perlu re-diskusi dari nol.
+
 ## 12. Keputusan Desain Tambahan (dari sesi implementasi `dataset_builder.py`)
 
 Bagian ini belum ada di draft desain awal, diputuskan pas implementasi
@@ -252,14 +263,3 @@ di sana — kemungkinan sisanya cuma lokal, nggak pernah di-push).
   (aman karena posisi yang di-index dijamin bukan NaN).
 
 ---
-
-## 11. Kebiasaan Kerja (Berlaku Sama Seperti Repo Lama)
-
-- Komunikasi santai, Bahasa Indonesia informal.
-- Progress step-by-step, bukan sekaligus semua — konfirmasi dulu sebelum
-  ngoding bagian besar.
-- Kalau ada operasi berat (build features skala penuh, training penuh),
-  **jangan langsung full-run** tanpa validasi di subset kecil dulu — belajar
-  dari `03a_build_features.py` yang makan 10 jam+ di repo lama.
-- Update dokumen ini kalau ada keputusan desain baru supaya sesi berikutnya
-  nggak perlu re-diskusi dari nol.

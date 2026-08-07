@@ -88,6 +88,11 @@ class Config:
     MIN_WINDOW_SIZE = 6
     HORIZON_STEPS = 18
 
+    # Resolusi timeline data Himawari (menit). Dipakai dataset_builder.py
+    # buat bangun timeline uniform. Ubah di sini SAJA kalau sumber data
+    # berubah resolusi -- jangan hardcode di fungsi manapun.
+    FREQ_MINUTES = 10
+
     # Direktori & nama file default output dataset training expanding window.
     EXPANDING_DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
     EXPANDING_DATASET_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_features.csv")

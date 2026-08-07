@@ -40,6 +40,18 @@ MIN_WINDOW_SIZE = Config.MIN_WINDOW_SIZE
 HORIZON_STEPS = Config.HORIZON_STEPS
 ANCHOR_SPAN = MIN_WINDOW_SIZE - 1 + HORIZON_STEPS + 1  # = 24
 
+# Offset dari `anchor` (start) ke `end` window IS1 (step=1), relatif ke
+# titik pertama window. IS1 punya MIN_WINDOW_SIZE titik (indeks 0-based
+# anchor..anchor+MIN_WINDOW_SIZE-1), jadi end IS1 = anchor + MIN_WINDOW_SIZE - 1.
+# Untuk step k, window tumbuh (k-1) titik dari IS1, jadi:
+#   end(step=k) = anchor + (MIN_WINDOW_SIZE - 1) + (k - 1)
+#               = anchor + (MIN_WINDOW_SIZE - 2) + k
+# WINDOW_OFFSET = MIN_WINDOW_SIZE - 2 dipakai di build_pixel_samples().
+# SEBELUMNYA ini hardcoded jadi angka 4 (yang cuma kebetulan benar untuk
+# MIN_WINDOW_SIZE=6 default) -- kalau MIN_WINDOW_SIZE diubah di config.py,
+# offset di sini WAJIB ikut berubah otomatis, makanya diturunkan eksplisit.
+WINDOW_OFFSET = MIN_WINDOW_SIZE - 2
+
 
 def discover_nc_files(base_dir, filename_pattern="subset_"):
     """Scan `base_dir` secara rekursif, cari semua file subset_*.nc, dan
@@ -63,12 +75,19 @@ def discover_nc_files(base_dir, filename_pattern="subset_"):
     return entries
 
 
-def build_uniform_timeline(entries, freq_minutes=10):
+def build_uniform_timeline(entries, freq_minutes=None):
     """Bangun index waktu uniform per `freq_minutes` dari timestamp
     pertama sampai terakhir yang ditemukan. Timestamp yang nggak punya file
     (gap file hilang) tetap ada slot-nya di timeline ini, cuma nanti nilainya
     NaN di semua pixel.
+
+    freq_minutes : int, optional
+        Default None -> pakai `Config.FREQ_MINUTES` (10, sesuai resolusi
+        Himawari). Diturunkan dari config, bukan hardcoded, supaya konsisten
+        kalau sumber data berubah resolusi.
     """
+    if freq_minutes is None:
+        freq_minutes = Config.FREQ_MINUTES
     t_min = entries[0][0]
     t_max = entries[-1][0]
     timeline = pd.date_range(t_min, t_max, freq=f"{freq_minutes}min")
@@ -205,8 +224,10 @@ def build_pixel_samples(y, anchors, pixel_id, pixel_lat, pixel_lon, timeline):
     steps = np.arange(1, HORIZON_STEPS + 1)
     # starts: tiap anchor diulang HORIZON_STEPS kali
     starts = np.repeat(anchors, HORIZON_STEPS)
-    # ends = a + 4 + k, untuk k=1..18 (k dari `steps`, di-tile per anchor)
-    ends = starts + 4 + np.tile(steps, len(anchors))
+    # ends = a + WINDOW_OFFSET + k, untuk k=1..HORIZON_STEPS (k dari `steps`,
+    # di-tile per anchor). WINDOW_OFFSET diturunkan dari Config.MIN_WINDOW_SIZE
+    # (lihat definisi di atas) -- BUKAN angka hardcoded lagi.
+    ends = starts + WINDOW_OFFSET + np.tile(steps, len(anchors))
     target_idx = ends + 1
 
     # PENTING: np.cumsum mem-propagate NaN -- begitu ada satu NaN di `y`,
@@ -232,7 +253,7 @@ def build_pixel_samples(y, anchors, pixel_id, pixel_lat, pixel_lon, timeline):
     return df
 
 
-def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=10):
+def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None):
     """Fungsi utama: baca semua file NetCDF di `data_dir`, generate dataset
     training expanding window untuk semua pixel, gabung jadi satu DataFrame.
 
@@ -249,8 +270,9 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
     anchor_stride : int, optional
         Jarak antar anchor yang dipakai. Default None -> pakai
         `Config.ANCHOR_STRIDE_DEFAULT`.
-    freq_minutes : int
-        Resolusi timeline (default 10 menit, sesuai Himawari).
+    freq_minutes : int, optional
+        Resolusi timeline. Default None -> pakai `Config.FREQ_MINUTES`
+        (10 menit, sesuai Himawari).
 
     Return
     ------
@@ -261,6 +283,8 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
         data_dir = Config.FINAL_BASE_DIR
     if anchor_stride is None:
         anchor_stride = Config.ANCHOR_STRIDE_DEFAULT
+    if freq_minutes is None:
+        freq_minutes = Config.FREQ_MINUTES
 
     entries = discover_nc_files(data_dir)
     if not entries:

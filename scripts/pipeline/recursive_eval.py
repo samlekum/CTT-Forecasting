@@ -1,27 +1,4 @@
 # ./scripts/pipeline/recursive_eval.py
-# Tahap 5: evaluasi RECURSIVE (bukan flat/teacher-forced seperti evaluate()
-# di model_training.py). Untuk tiap anchor di test set, window mulai dari
-# IS1 (6 titik REAL observasi), lalu prediksi step 1 (OS1). Mulai step 2,
-# window di-extend pakai HASIL PREDIKSI MODEL SENDIRI (bukan observasi real
-# lagi) -- ini yang bikin "recursive": error dari step sebelumnya bisa
-# nge-compound ke step berikutnya. Lihat CLAUDE.md §7.
-#
-# KENAPA PAKAI CACHE .npz, BUKAN BACA ULANG .nc:
-# Baca 34rb+ file NetCDF makan ~12.5 jam (I/O bound, sudah divalidasi di
-# sesi build dataset). Modul ini re-use cache raw data_matrix yang disimpan
-# dataset_builder.save_raw_cache() saat 02_build_expanding_features.py
-# jalan, jadi load raw time series di sini tinggal hitungan detik.
-#
-# KENAPA SLOPE TETAP VALID PAKAI INDEKS LOKAL (BUKAN GLOBAL):
-# expanding_features.py menghitung slope dari cumsum_ty dengan t = indeks
-# GLOBAL (posisi di timeline penuh). Tapi slope regresi linear y~t itu
-# INVARIAN terhadap pergeseran konstan pada t (slope = Cov(t,y)/Var(t),
-# keduanya tidak berubah kalau t digeser rata). Jadi menghitung slope
-# dengan t lokal (0..L-1, relatif ke window) di modul ini menghasilkan
-# nilai identik dengan closed-form training yang pakai t global -- FITUR
-# LAIN (mean/std/min/max/first/last) sama sekali tidak bergantung pada t,
-# jadi otomatis identik juga. Ini yang bikin kita nggak perlu lacak indeks
-# global anchor di sini, cukup array lokal per anchor yang tumbuh tiap step.
 
 import os
 
@@ -147,15 +124,62 @@ def _compute_window_features_local(series_matrix):
     })[FEATURE_COLUMNS]
 
 
-def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeline):
+def _apply_damping(raw_pred, last_value, step, damping_factor):
+    """Redam delta prediksi model terhadap nilai terakhir di window, makin
+    kuat seiring step recursive bertambah.
+
+    KENAPA: diagnostic sesi ini (diagnose_recursive_drift.py +
+    check_true_spatial_variance.py, lihat CLAUDE.md update) nemuin
+    spatial_collapse_ratio NAIK (bukan turun ke 0) sampai >2 di step 18,
+    ternyata dari pred_std yang MEMBESAR ~50% (bukan true_std yang
+    mengecil) -- exposure bias klasik: window pas recursive rollout makin
+    lama makin isi hasil prediksi sendiri, mendorong fitur (terutama
+    std_window/slope/delta_first_last) ke wilayah yang jarang/nggak
+    pernah dilihat model pas training (overlap p5-p95 turun sampai ~0.5
+    di step 10-18), model jadi ekstrapolasi liar -- paling parah di pixel
+    tepi/pojok grid (mis. 4_6, konsisten top-1 di semua model/step).
+
+    FIX: pisahkan prediksi mentah model jadi (last_value + delta), lalu
+    kecilkan delta itu secara geometris tiap step (damping_factor ** (step-1))
+    SEBELUM dipakai sebagai forecast final DAN sebelum di-feed balik ke
+    window. Ini membatasi seberapa jauh model boleh "lari" dari nilai
+    persisten terakhir tiap langkah recursive, tanpa perlu retrain atau
+    rebuild dataset -- damping_factor=1.0 (default) = TIDAK ADA PERUBAHAN
+    (persis perilaku lama, backward-compatible).
+
+    Trade-off: damping_factor < 1 bikin forecast condong ke persistence
+    (nilai terakhir) makin lama makin kuat -- bagus buat cegah divergensi,
+    tapi kalau terlalu kecil (mis. 0.5) forecast jangka panjang jadi
+    hampir flat/tidak informatif. WAJIB di-tuning & dibandingkan MAE per
+    step + spatial_collapse_ratio (lihat 04_recursive_evaluate.py --damping-factor),
+    bukan asal pilih nilai kecil.
+    """
+    if damping_factor >= 1.0:
+        return raw_pred
+    delta = raw_pred - last_value
+    damped_delta = delta * (damping_factor ** (step - 1))
+    return last_value + damped_delta
+
+
+def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeline, damping_factor=1.0):
     """Jalankan recursive forecast untuk SATU model di semua anchor test
     set sekaligus (vectorized lintas anchor, sekuensial lintas step -- step
     k butuh hasil prediksi step k-1, jadi nggak bisa divectorize lintas step).
 
+    Parameters
+    ----------
+    damping_factor : float, default 1.0 (TIDAK ADA REDAMAN -- perilaku lama,
+        backward-compatible). Kalau < 1.0, delta prediksi model terhadap
+        nilai terakhir di window diredam geometris tiap step -- lihat
+        _apply_damping() untuk alasan & detail. Harus di rentang (0, 1].
+
     Return
     ------
     pd.DataFrame long-format, kolom: model, pixel_id, anchor_t0, step,
-    target_time, y_true, y_pred, abs_error. Satu baris per (anchor, step).
+    target_time, y_true, y_pred, y_pred_raw, abs_error. Satu baris per
+    (anchor, step). y_pred_raw = prediksi mentah model SEBELUM damping
+    (sama dengan y_pred kalau damping_factor=1.0) -- disimpan supaya bisa
+    dibandingkan langsung efek damping-nya tanpa re-run.
     """
     n_anchor = len(anchors_idx)
     starts = anchors_idx["start_idx"].values
@@ -173,7 +197,9 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
     for step in step_progress:
         L = series.shape[1]
         features_df = _compute_window_features_local(series)
-        y_pred = model.predict(features_df)
+        y_pred_raw = model.predict(features_df)
+        last_value = series[:, -1]
+        y_pred = _apply_damping(y_pred_raw, last_value, step, damping_factor)
 
         target_idx = starts + L  # posisi tepat setelah window saat ini (0-based)
         y_true = data_matrix[target_idx, pixel_cols]
@@ -187,12 +213,15 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
             "target_time": timeline[target_idx].values,
             "y_true": y_true,
             "y_pred": y_pred,
+            "y_pred_raw": y_pred_raw,
             "abs_error": abs_error,
         }))
 
-        # Extend window pakai prediksi sendiri (recursive) -- INI KUNCI
-        # BEDANYA dengan evaluate() flat di model_training.py yang selalu
-        # pakai observasi real di semua step.
+        # Extend window pakai prediksi (SUDAH didamping kalau damping_factor<1)
+        # -- ini kunci bedanya dengan evaluate() flat di model_training.py
+        # yang selalu pakai observasi real di semua step. Feed-back pakai
+        # y_pred yang didamping (bukan y_pred_raw) supaya efek redaman ikut
+        # kebawa ke fitur step berikutnya, bukan cuma di angka yang dilaporkan.
         series = np.concatenate([series, y_pred.reshape(-1, 1)], axis=1)
 
     return pd.concat(records, ignore_index=True)
@@ -285,9 +314,16 @@ def summarize_by_step(detail_df):
     return summary.sort_values(["model", "step"]).reset_index(drop=True)
 
 
-def run_all_models(models_dir=None, dataset_csv_path=None, cache_path=None, test_frac=None):
+def run_all_models(models_dir=None, dataset_csv_path=None, cache_path=None, test_frac=None, damping_factor=1.0):
     """Fungsi utama Tahap 5: load cache + test anchors + semua model, jalankan
     recursive eval per model, simpan detail & summary CSV.
+
+    Parameters
+    ----------
+    damping_factor : float, default 1.0 (tidak ada redaman). Diteruskan ke
+        run_recursive_evaluation() -- lihat _apply_damping() untuk alasan
+        fix ini ada (investigasi spatial_collapse_ratio naik >2x di step 18,
+        lihat CLAUDE.md).
 
     Return
     ------
@@ -325,15 +361,29 @@ def run_all_models(models_dir=None, dataset_csv_path=None, cache_path=None, test
             say_info(f"PERINGATAN: model {model_name} tidak ditemukan di {model_path}, dilewati.")
             continue
         model = joblib.load(model_path)
-        detail_frames.append(run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeline))
+        detail_frames.append(run_recursive_evaluation(
+            model_name, model, anchors_idx, data_matrix, timeline, damping_factor=damping_factor,
+        ))
 
     detail_df = pd.concat(detail_frames, ignore_index=True)
     summary_df = summarize_by_step(detail_df)
 
+    # Kalau damping aktif (damping_factor != 1.0), JANGAN timpa file baseline
+    # (recursive_evaluation.csv / recursive_mae_summary.csv hasil run tanpa
+    # damping) -- suffix nama file pakai damping_factor supaya bisa dibanding
+    # langsung sebelum/sesudah tanpa perlu re-run baseline lagi. Default
+    # (damping_factor=1.0) TETAP nulis ke path asli, 100% backward-compatible.
+    detail_path = Config.RECURSIVE_EVAL_DETAIL_FILE
+    summary_path = Config.RECURSIVE_EVAL_SUMMARY_FILE
+    if damping_factor < 1.0:
+        suffix = f"_damp{damping_factor:.2f}".replace(".", "")
+        detail_path = detail_path.replace(".csv", f"{suffix}.csv")
+        summary_path = summary_path.replace(".csv", f"{suffix}.csv")
+
     os.makedirs(Config.EXPANDING_EVAL_DIR, exist_ok=True)
-    detail_df.to_csv(Config.RECURSIVE_EVAL_DETAIL_FILE, index=False)
-    summary_df.to_csv(Config.RECURSIVE_EVAL_SUMMARY_FILE, index=False)
-    say_ok(f"Detail evaluasi disimpan ke: {Config.RECURSIVE_EVAL_DETAIL_FILE}")
-    say_ok(f"Ringkasan MAE per step disimpan ke: {Config.RECURSIVE_EVAL_SUMMARY_FILE}")
+    detail_df.to_csv(detail_path, index=False)
+    summary_df.to_csv(summary_path, index=False)
+    say_ok(f"Detail evaluasi disimpan ke: {detail_path}")
+    say_ok(f"Ringkasan MAE per step disimpan ke: {summary_path}")
 
     return detail_df, summary_df

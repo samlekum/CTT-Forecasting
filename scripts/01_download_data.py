@@ -8,7 +8,6 @@ import logging
 from ui.terminal_display import (
     hr, gap, banner,
     say_info, say_download, say_ok, say_skip, say_error, say_fatal,
-    make_total_progress_bar,
 )
 from pipeline.config import load_config
 from pipeline.ftp_client import FTPClient

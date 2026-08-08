@@ -105,10 +105,17 @@ def _apply_damping(raw_pred, last_value, step, damping_factor):
     return last_value + damped_delta
 
 
-def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeline, damping_factor=1.0):
+def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeline, damping_factor=1.0,
+                              capture_features=False):
     """Jalankan recursive forecast untuk SATU model di semua anchor test
     set sekaligus (vectorized lintas anchor, sekuensial lintas step -- step
     k butuh hasil prediksi step k-1, jadi nggak bisa divectorize lintas step).
+
+    Ini SATU-SATUNYA implementasi rollout recursive di pipeline ini --
+    scripts/tools/diagnose_recursive_drift.py (diagnostic feature-shift)
+    memanggil fungsi INI dengan capture_features=True, BUKAN implementasi
+    rollout terpisah, supaya cuma ada satu tempat yang perlu diubah kalau
+    logika rollout (mis. formula damping) berubah lagi nanti.
 
     Parameters
     ----------
@@ -116,14 +123,28 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
         backward-compatible). Kalau < 1.0, delta prediksi model terhadap
         nilai terakhir di window diredam geometris tiap step -- lihat
         _apply_damping() untuk alasan & detail. Harus di rentang (0, 1].
+    capture_features : bool, default False. Kalau True, snapshot 9 fitur
+        closed-form TIAP STEP (sebelum dipakai predict) ikut dikumpulkan &
+        di-return sebagai DataFrame kedua -- dipakai diagnose_recursive_drift.py
+        buat bandingkan distribusi fitur rollout vs training (feature
+        distribution shift). Default False = perilaku lama persis (return
+        satu DataFrame saja), 100% backward-compatible untuk caller yang
+        sudah ada (run_all_models di file ini, sweep_damping.py).
 
     Return
     ------
-    pd.DataFrame long-format, kolom: model, pixel_id, anchor_t0, step,
-    target_time, y_true, y_pred, y_pred_raw, abs_error. Satu baris per
-    (anchor, step). y_pred_raw = prediksi mentah model SEBELUM damping
-    (sama dengan y_pred kalau damping_factor=1.0) -- disimpan supaya bisa
-    dibandingkan langsung efek damping-nya tanpa re-run.
+    Kalau capture_features=False (default): pd.DataFrame long-format, kolom:
+    model, pixel_id, anchor_t0, step, target_time, y_true, y_pred,
+    y_pred_raw, abs_error. Satu baris per (anchor, step). y_pred_raw =
+    prediksi mentah model SEBELUM damping (sama dengan y_pred kalau
+    damping_factor=1.0) -- disimpan supaya bisa dibandingkan langsung efek
+    damping-nya tanpa re-run.
+
+    Kalau capture_features=True: tuple (detail_df, features_df) -- detail_df
+    sama seperti di atas, features_df long-format kolom FEATURE_COLUMNS +
+    "step" (satu baris per (anchor, step), fitur SEBELUM damping diterapkan
+    ke prediksi -- damping cuma mempengaruhi angka yang di-feed-back ke
+    window step berikutnya, bukan fitur yang dipakai predict di step ini).
     """
     n_anchor = len(anchors_idx)
     starts = anchors_idx["start_idx"].values
@@ -137,6 +158,7 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
     ])  # shape (n_anchor, MIN_WINDOW_SIZE)
 
     records = []
+    feature_records = [] if capture_features else None
     step_progress = make_progress_bar(range(1, HORIZON_STEPS + 1), desc=f"Recursive [{model_name}]", unit="step")
     for step in step_progress:
         L = series.shape[1]
@@ -161,6 +183,11 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
             "abs_error": abs_error,
         }))
 
+        if capture_features:
+            snap = features_df.copy()
+            snap["step"] = step
+            feature_records.append(snap)
+
         # Extend window pakai prediksi (SUDAH didamping kalau damping_factor<1)
         # -- ini kunci bedanya dengan evaluate() flat di model_training.py
         # yang selalu pakai observasi real di semua step. Feed-back pakai
@@ -168,7 +195,10 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
         # kebawa ke fitur step berikutnya, bukan cuma di angka yang dilaporkan.
         series = np.concatenate([series, y_pred.reshape(-1, 1)], axis=1)
 
-    return pd.concat(records, ignore_index=True)
+    detail_df = pd.concat(records, ignore_index=True)
+    if capture_features:
+        return detail_df, pd.concat(feature_records, ignore_index=True)
+    return detail_df
 
 
 def spatial_collapse_ratio(preds, actuals):

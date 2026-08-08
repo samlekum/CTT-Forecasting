@@ -11,9 +11,10 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 
 class Config:
+    """Konfigurasi terpusat untuk pipeline."""
+
     PROJECT_ROOT = PROJECT_ROOT
 
-    """Konfigurasi terpusat untuk pipeline."""
     # FTP Credentials
     FTP_HOST = os.environ.get("FTP_HOST")
     FTP_USER = os.environ.get("FTP_USER")
@@ -87,6 +88,49 @@ class Config:
     # lama harus di-rebuild ulang setelah diubah.
     MIN_WINDOW_SIZE = 6
     HORIZON_STEPS = 18
+    assert MIN_WINDOW_SIZE >= 2, (
+        "MIN_WINDOW_SIZE minimal 2 -- window IS1 butuh >=2 titik supaya slope "
+        "(regresi linear y~t) punya varians waktu (t) yang tidak nol. Kalau "
+        "cuma 1 titik, denom OLS = 0 dan slope diam-diam fallback ke 0 "
+        "(lihat expanding_features.compute_expanding_window_features)."
+    )
+    assert HORIZON_STEPS >= 1, "HORIZON_STEPS minimal 1 -- expanding window recursive butuh minimal 1 step horizon."
+
+    # Rentang total 1 anchor: dari titik pertama window (anchor_t0) sampai
+    # target step HORIZON_STEPS, inklusif. Definisi identik dengan yang
+    # sebelumnya cuma dihitung lokal di dataset_builder.py -- disentralkan ke
+    # sini (satu sumber kebenaran) karena sekarang DIPAKAI JUGA oleh
+    # model_training.py (lihat PURGE_STEPS di bawah, untuk purge/embargo
+    # stratified_monthly_split() -- lihat investigasi temporal leakage sesi
+    # ini). dataset_builder.py tetap jadi tempat definisi ANCHOR_SPAN dipakai
+    # (gap-skip rule §4), tapi nilainya sekarang diturunkan dari sini.
+    ANCHOR_SPAN = MIN_WINDOW_SIZE + HORIZON_STEPS
+
+    # Purge/embargo (satuan tick FREQ_MINUTES) yang WAJIB di-drop dari train,
+    # di stratified_monthly_split(). KENAPA: window training untuk step
+    # manapun (sampai HORIZON_STEPS) bisa menjangkau sampai ANCHOR_SPAN-1
+    # titik ke depan dari anchor_t0-nya sendiri -- kalau anchor_t0 train
+    # terlalu dekat ke cutoff, window/target row itu bisa menyentuh raw
+    # observasi yang SECARA WAKTU sudah masuk wilayah test (bahkan bisa jadi
+    # nilai yang sama persis dipakai sebagai target test row lain -- temporal
+    # leakage). PURGE_STEPS = ANCHOR_SPAN-1 adalah batas konservatif.
+    #
+    # DUA SISI diterapkan (lihat docstring lengkap stratified_monthly_split()
+    # di model_training.py untuk detail & alasan tiap sisi ditemukan):
+    # 1. SEBELUM cutoff tiap bulan: anchor dgn `anchor_t0 < cutoff_time -
+    #    PURGE_STEPS*FREQ_MINUTES` di-drop dari train bulan itu.
+    # 2. SETELAH anchor test terakhir tiap bulan: anchor MANAPUN (bisa bulan
+    #    berikutnya) dgn `anchor_t0` dalam PURGE_STEPS*FREQ_MINUTES menit
+    #    setelah anchor test terakhir bulan sebelumnya JUGA di-drop --
+    #    ditemukan lewat validasi (bukan cuma teori) bahwa anchor test akhir
+    #    bulan bisa punya target yang menjorok ke bulan berikutnya, dan
+    #    window training di awal bulan berikutnya bisa berbagi raw value
+    #    dengan target itu kalau sisi ini tidak ada.
+    #
+    # Kedua sisi menjamin window/target train (step manapun) tidak pernah
+    # menyentuh index >= cutoff bulan manapun. Test set TIDAK terpengaruh oleh
+    # ini (tetap anchor_t0 >= cutoff_time, lihat model_training.py).
+    PURGE_STEPS = ANCHOR_SPAN - 1
 
     # Resolusi timeline data Himawari (menit). Dipakai dataset_builder.py
     # buat bangun timeline uniform. Ubah di sini SAJA kalau sumber data

@@ -1,4 +1,4 @@
-# ./scripts/03_train_model.py
+# ./scripts/03_train_models.py
 # Tahap 3: latih model (XGBoost/LightGBM/CatBoost) pada dataset expanding
 # window hasil 02_build_expanding_features.py. Split stratified per-bulan
 # (CLAUDE.md §6), evaluasi dasar keseluruhan (bukan per-step -- itu di

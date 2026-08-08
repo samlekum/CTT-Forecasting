@@ -1006,3 +1006,304 @@ under-fit ke sinyal asli / MAE flat naik banyak).
   damping_factor bisa geser setelah retrain.
 
 ---
+
+## 18. Investigasi & Fix Temporal Leakage + Bug Fixes + Simplifikasi (sesi lanjutan)
+
+**STATUS SINGKAT**: sesi ini menemukan & memperbaiki masalah yang JAUH
+lebih signifikan dari yang diduga sebelumnya: **temporal leakage** di
+`stratified_monthly_split()` yang tidak pernah diinvestigasi di sesi mana
+pun sebelum ini. Urutan kerja: audit kode-level menyeluruh (diminta Dhika,
+BUKAN dari laporan bug manapun) → investigasi leakage mendalam (dibuktikan
+matematis + numerik terhadap kode asli, BUKAN dugaan) → fix purge/embargo
+dua sisi → **audit ULANG independen terhadap fix itu sendiri** (diminta
+Dhika secara eksplisit, "jangan asumsikan kerjaan sebelumnya sudah pasti
+benar") → ketemu 2 temuan dokumentasi minor, diperbaiki → retrain + re-eval
+end-to-end di data produksi asli.
+
+### 18.1 Catatan penting: CLAUDE.md sempat basi SEBELUM sesi ini pun mulai
+
+Ditemukan lewat cek mtime file (bukan cuma baca dokumen): retrain dengan
+`--noise-std 2.5` DAN damping resweep (§17 poin 7, ditandai "URGENT sesi
+depan") ternyata SUDAH dijalankan Dhika di luar sesi Claude manapun --
+mtime `models/*.joblib` & `evaluation/*damp*.csv` menunjukkan run terjadi
+SEBELUM sesi audit ini dimulai. Artinya dokumen ini sudah basi terhadap
+state repo aktual bahkan sebelum investigasi leakage dimulai. **Pelajaran
+buat sesi depan**: jangan percaya "Belum dikerjakan" di CLAUDE.md tanpa
+verifikasi mtime/isi file aktual dulu -- CLAUDE.md bisa telat update
+relatif terhadap kerjaan yang dilakukan di luar sesi Claude.
+
+### 18.2 Temuan utama: Temporal Leakage di `stratified_monthly_split()`
+
+Ditemukan lewat audit kode-level menyeluruh terhadap `stratified_monthly_split()`
+(`pipeline/model_training.py`). **Dibuktikan, bukan diduga** -- dengan
+menjalankan fungsi ASLI (bukan reimplementasi) terhadap timeline sintetis
+dan menelusuri index mentah secara eksplisit.
+
+**Mekanisme**: split membagi train/test HANYA berdasarkan `anchor_t0`
+(titik AWAL window), padahal window/target satu row bisa menjangkau sampai
+`ANCHOR_SPAN-1` = 23 titik (230 menit) KE DEPAN dari `anchor_t0`-nya.
+Anchor train yang `anchor_t0`-nya dekat `cutoff_time` bisa punya
+window/target yang menyentuh raw observasi yang SECARA WAKTU sudah masuk
+wilayah test -- bahkan bisa jadi nilai PERSIS SAMA dengan target salah
+satu test row. Model jadi "melihat" (lewat agregasi fitur closed-form)
+realisasi atmosfer yang nanti dia diminta prediksi buta di evaluasi.
+
+**Skala** (diukur di dataset sintetis 1 bulan, representatif per bulan
+produksi): ~0,2-0,4% baris train terkontaminasi, ~1,1-1,9% baris test
+targetnya "sudah dilihat" training. Ekstrapolasi ke 8 bulan × 35 pixel
+produksi: ~38.000-43.000 baris terdampak dari 11,6 juta train / 2,04 juta
+test.
+
+**Mekanisme KEDUA** ditemukan belakangan (pas implementasi fix pertama
+gagal validasi, bukan diantisipasi dari awal): anchor test PALING AKHIR
+suatu bulan bisa punya target yang menjorok ke BULAN BERIKUTNYA -- window
+training di awal bulan berikutnya (jauh dari cutoff bulan itu sendiri)
+ternyata bisa berbagi raw value dengan target test bulan sebelumnya itu.
+Purge satu-sisi ("sebelum cutoff" saja) TIDAK CUKUP -- wajib dua sisi,
+diterapkan lintas bulan.
+
+### 18.3 Fix: Purge/Embargo Dua Sisi
+
+**`Config.ANCHOR_SPAN`** (baru, `pipeline/config.py`) = `MIN_WINDOW_SIZE +
+HORIZON_STEPS` -- disentralkan (sebelumnya cuma dihitung lokal di
+`dataset_builder.py`), sekarang satu sumber kebenaran dipakai
+`dataset_builder.py` DAN `model_training.py`.
+
+**`Config.PURGE_STEPS`** (baru) = `ANCHOR_SPAN - 1` = 23 tick = 230 menit
+(dgn default `MIN_WINDOW_SIZE=6`/`HORIZON_STEPS=18`) -- batas konservatif,
+TIDAK di-hardcode, otomatis ikut berubah kalau `MIN_WINDOW_SIZE`/
+`HORIZON_STEPS` diubah.
+
+**`stratified_monthly_split()`** dapat parameter baru `purge_steps`
+(default `Config.PURGE_STEPS`). Logic jadi 2-pass:
+1. Pass 1: hitung `cutoff_time` tiap bulan (TIDAK BERUBAH dari sebelumnya)
+   + kumpulkan interval purge DUA SISI per bulan (sebelum cutoff bulan
+   itu, DAN setelah anchor test terakhir bulan itu -- sisi kedua bisa
+   "menembus" ke bulan berikutnya).
+2. Pass 2: terapkan SEMUA interval purge itu sebagai satu mask GLOBAL ke
+   seluruh dataframe (lintas bulan, bukan per-grup independen kayak versi
+   lama) -- baris di zona purge dibuang total (bukan train, bukan test).
+
+`cutoff_time` & definisi TEST **TIDAK BERUBAH SAMA SEKALI** (`anchor_t0 >=
+cutoff_time`, dihitung persis sama seperti sebelumnya) -- purge HANYA
+mengurangi train. `select_test_anchors()` (Stage 4) otomatis tetap
+konsisten karena manggil fungsi yang SAMA dgn default yang sama.
+`purge_steps=0` mereproduksi PERSIS perilaku lama (tanpa purge) --
+disediakan untuk perbandingan/debug, BUKAN default produksi.
+
+### 18.4 Validasi: `validate_no_leakage.py` (baru, `pipeline/validate_no_leakage.py`)
+
+Pola sama seperti `validate_expanding_features.py` -- pakai fungsi ASLI
+(`find_valid_anchors`, `build_pixel_samples`, `stratified_monthly_split`,
+`select_test_anchors`), timeline sintetis, BUKAN data produksi (cepat,
+self-contained, WAJIB PASS sebelum purge dipercaya).
+
+**5 skenario, SEMUA PASS**:
+1. 1 bulan / 1 pixel, tanpa gap
+2. 3 bulan / 2 pixel, tanpa gap
+3. 4 bulan / 3 pixel, tanpa gap
+4. 3 bulan / 2 pixel, DENGAN gap 48 jam persis di batas bulan
+   Januari/Februari (stress-test purge lintas-bulan dgn kepadatan anchor
+   tidak beraturan)
+5. Sparse-month ekstrem (1 bulan cuma punya 36 anchor valid, semua di
+   ujung akhir bulan)
+
+5 check per skenario: (1) window training tidak menyentuh timestamp >=
+cutoff, (2) target training tidak >= cutoff, (3) tidak ada raw value
+dipakai ganda (feature train & target test), (4) test set TIDAK berubah
+oleh purge, (5) `select_test_anchors()` konsisten dgn
+`stratified_monthly_split()` langsung.
+
+### 18.5 Audit ulang independen (diminta Dhika, dijalankan SETELAH fix)
+
+Instruksi eksplisit: audit ulang MANDIRI terhadap fix itu sendiri, "jangan
+asumsikan kerjaan sebelumnya sudah pasti benar". Hasil:
+- Diff review baris-per-baris semua file berubah -- edge case
+  (`purge_steps=0`, bulan tunggal, sparse month, gap, `ANCHOR_SPAN`
+  berubah) di-derivasi manual & terbukti aman.
+- Reproducibility CONFIRMED: retrain lightgbm dari nol menghasilkan MAE
+  identik dgn yang dilaporkan (2,751500K), `n_train`/`n_test` persis sama.
+- Semua caller fungsi yang diubah (`sweep_damping.py`,
+  `diagnose_recursive_drift.py`, dll) dicek -- TIDAK ADA breaking change.
+- **2 temuan minor** (dokumentasi/precondition, BUKAN bug fungsional --
+  semua hasil empiris tetap benar, sudah diperbaiki):
+  1. Komentar `PURGE_STEPS` di `config.py` awalnya cuma jelasin sisi
+     "sebelum cutoff", lupa update setelah fix dua-sisi ditambahkan.
+  2. Precondition implisit (`time_col` harus grid-aligned per
+     `FREQ_MINUTES` biar matematika interval closed-boundary valid) tidak
+     didokumentasikan di `stratified_monthly_split()` -- sekarang ada
+     catatan eksplisit di docstring.
+
+### 18.6 Retrain + Re-eval End-to-End (data produksi asli, split terpurge)
+
+Model lama (noise_std=2.5, TANPA purge) di-backup ke
+`_backup_before_leakage_fix_<timestamp>/` (bukan dihapus), lalu retrain
+ulang dgn split yang sudah dipurge:
+
+| Metrik | Sebelum fix | Sesudah fix | Δ |
+|---|---|---|---|
+| `n_train` | 11.576.250 | 11.490.570 | -85.680 (-0,74%) |
+| `n_test` | 2.044.980 | 2.044.980 | **0 (identik)** |
+| anchor test unik | 113.610 | 113.610 | **0 (identik)** |
+| MAE flat xgboost | 2,7437K | 2,7454K | +0,06% |
+| MAE flat lightgbm | 2,7497K | 2,7515K | +0,07% |
+| MAE flat catboost | 2,7262K | 2,7302K | +0,15% |
+| MAE recursive step 18 (xgboost) | 13,196K | 13,194K | -0,02% |
+| `spatial_collapse_ratio` step 18 (xgboost) | 1,371 | 1,366 | -0,3% |
+
+**Kesimpulan**: leakage terbukti tertutup total (0 mismatch di semua
+check, 5 skenario), TAPI dampak ke angka metrik agregat yang sudah
+dilaporkan sebelumnya SANGAT KECIL (<0,2% di semua metrik) -- fix ini
+murni memperbaiki kebenaran metodologi evaluasi, bukan mengubah kesimpulan
+performa model. Model `.joblib` & `evaluation/*.csv` di disk SEKARANG
+adalah hasil split yang sudah dipurge (per 2026-08-08).
+
+### 18.7 Bug fixes lain (di luar leakage)
+
+| # | File | Bug | Status |
+|---|---|---|---|
+| A | `config.py` | `Config.__doc__` tidak valid (docstring salah posisi) | Fixed |
+| B | `03_train_models.py` | Header masih nyebut nama file lama | Fixed |
+| C | `validate_expanding_features.py` | Header masih nyebut path lama (`scripts/tools/`) | Fixed |
+| D | `01_download_data.py` | Dead import `make_total_progress_bar` | Fixed |
+| E | `config.py` | `TBB_CHANNELS`/`INTERVALS_MINUTES`/`LAG_COUNT` dead code | SENGAJA TIDAK dihapus (didokumentasikan dipertahankan utk reuse) |
+| F | `config.py` | `MIN_WINDOW_SIZE`/`HORIZON_STEPS` tanpa validasi | `assert MIN_WINDOW_SIZE >= 2` & `assert HORIZON_STEPS >= 1` ditambah |
+
+### 18.8 Simplifikasi redundant code
+
+- `diagnose_recursive_drift.py::_rollout_with_features()` (duplikat penuh
+  rollout recursive) -- **DIHAPUS**, diganti panggilan
+  `recursive_eval.run_recursive_evaluation(capture_features=True)`
+  (parameter baru, default `False` = perilaku lama, backward-compatible).
+  Sekarang cuma ada SATU implementasi rollout recursive di seluruh
+  pipeline.
+- `compare_interior_vs_edge_spatial_metrics.py::_spatial_metrics_for_subset()`
+  -- logic groupby/aggregate duplikat dihapus, sekarang wrapper tipis di
+  atas `recursive_eval._spatial_metrics_per_step()`.
+
+### Belum dikerjakan / status terkini (menggantikan list "URGENT" di §17)
+
+- ~~Retrain dgn `--noise-std` di data asli~~ -- **SUDAH**, 2x malah
+  (sekali dgn split lama/leaky di luar sesi terdokumentasi -- lihat
+  §18.1, sekali lagi dgn split terpurge di sesi ini -- lihat §18.6).
+- ~~Re-sweep `damping_factor` pasca-retrain+purge~~ -- **SUDAH**, lihat
+  §18.9 di bawah. **KESIMPULAN BERUBAH dari §17 poin 6**: `damping_factor=0.9`
+  TIDAK LAGI optimal.
+- `pipeline/inference.py` / `05_run_inference.py` -- masih BELUM dibahas
+  sama sekali (tetap seperti §10/§17).
+- `_backup_before_leakage_fix_<timestamp>/` ada di root repo -- bukan
+  bagian permanen pipeline, hapus manual kalau sudah tidak diperlukan.
+
+### 18.9 Hasil re-sweep `damping_factor` (model noise_std=2.5 + split terpurge)
+
+Dijalankan `scripts/tools/sweep_damping.py` (6 faktor: `1.0, 0.9, 0.8, 0.7,
+0.6, 0.5`, ~12 menit, 113.610 anchor × 3 model × 18 step). Output:
+`evaluation/damping_sweep_comparison.csv` (menimpa hasil sweep lama yang
+dijalankan terhadap model SEBELUM fix leakage -- lihat §18.1, sweep lama
+itu juga sudah basi terhadap model saat ini, bukan cuma karena leakage
+tapi karena noise injection juga sudah mengubah karakteristik model).
+
+**MAE step 18** (konsisten di ketiga model, MENURUN monoton dari
+`damping_factor` kecil ke besar -- KEBALIKAN dari pola §17 poin 6):
+
+| damping_factor | xgboost | lightgbm | catboost |
+|---|---|---|---|
+| **1.0 (tanpa redaman)** | **13.194** | **13.157** | **13.182** |
+| 0.9 | 13.422 | 13.404 | 13.462 |
+| 0.8 | 13.805 | 13.792 | 13.816 |
+| 0.7 | 14.023 | 14.011 | 14.014 |
+| 0.6 | 14.149 | 14.135 | 14.132 |
+| 0.5 | 14.230 | 14.215 | 14.208 |
+
+**KOREKSI PENTING (ditemukan Dhika lewat pertanyaan lanjutan, sesi ini
+juga)**: kesimpulan "1.0 menang" di atas HANYA benar untuk step 18 /
+rata-rata seluruh horizon -- BUKAN benar di setiap step. Ada **pola
+crossover** antara `damping_factor=1.0` dan `0.9` yang tidak kelihatan
+kalau cuma lihat step 18 atau rata-rata. Tabel di bawah: `diff_pct` =
+`(MAE@0.9 - MAE@1.0) / MAE@1.0 * 100` -- NEGATIF berarti `0.9` lebih baik
+(MAE lebih rendah), POSITIF berarti `1.0` lebih baik.
+
+| step | xgboost | lightgbm | catboost | pemenang |
+|---|---|---|---|---|
+| 1 | 0,00% | 0,00% | 0,00% | seri (damping tidak berlaku di step 1, by design) |
+| 2 | -0,31% | -0,35% | -0,34% | `0.9` |
+| 3 | -0,38% | -0,47% | -0,48% | `0.9` |
+| 4 | -0,45% | -0,53% | -0,58% | `0.9` |
+| 5 | -0,54% | -0,57% | -0,63% | `0.9` |
+| 6 | -0,55% | -0,58% | -0,65% | `0.9` (margin terbesar `0.9`) |
+| 7 | -0,53% | -0,52% | -0,56% | `0.9` |
+| 8 | -0,42% | -0,38% | -0,44% | `0.9` |
+| 9 | -0,34% | -0,26% | -0,36% | `0.9` |
+| 10 | -0,25% | -0,15% | -0,22% | `0.9` |
+| 11 | -0,13% | +0,01% | -0,04% | ~seri (titik crossover) |
+| 12 | +0,03% | +0,20% | +0,23% | `1.0` (mulai unggul) |
+| 13 | +0,22% | +0,39% | +0,48% | `1.0` |
+| 14 | +0,47% | +0,64% | +0,81% | `1.0` |
+| 15 | +0,74% | +0,92% | +1,13% | `1.0` |
+| 16 | +1,07% | +1,21% | +1,42% | `1.0` |
+| 17 | +1,40% | +1,57% | +1,74% | `1.0` |
+| 18 | +1,73% | +1,88% | +2,12% | `1.0` (margin terbesar `1.0`) |
+
+**Baca polanya**: `damping_factor=0.9` menang TIPIS di horizon
+menengah-pendek (step 2-11, margin 0,01%-0,65%), tapi `damping_factor=1.0`
+menang JELAS dan MEMBESAR di horizon panjang (step 12-18, margin
+0,03%-2,12%, sampai ~3-10x lebih besar dari margin kemenangan `0.9` di
+step awal). Ini BUKAN hubungan monoton "1.0 selalu terbaik" -- ada
+crossover nyata di sekitar step 11-12.
+
+**KENAPA `damping_factor=1.0` tetap dipilih jadi konfigurasi final**
+(BUKAN karena menang di semua step -- karena TIDAK): **prioritas use-case
+pipeline ini adalah horizon panjang (step 12-18)**. Metode rekursif
+membuat error terakumulasi paling signifikan justru di step-step akhir --
+itu ujian utama kualitas model (bisa nge-generalize sejauh apa rollout-nya
+sebelum divergen), bukan step-step awal yang secara inheren lebih gampang
+diprediksi (window masih didominasi observasi real). Karena prioritasnya
+di situ, margin kemenangan `1.0` yang MEMBESAR justru di step 12-18 (bukan
+mengecil) langsung relevan dengan tujuan pipeline -- sementara margin
+kekalahan `1.0` di step 2-11 kecil (<0,65%) dan di area yang bukan fokus
+utama. Kalau prioritas use-case berbeda (mis. cuma peduli forecast <2 jam
+ke depan / step <=11), kesimpulannya bisa BALIK ke `0.9`.
+
+**`spatial_collapse_ratio`**: hampir flat antara `1.0` (1,366) dan `0.9`
+(1,362) untuk xgboost (beda nyaris tidak signifikan), lalu justru MEMBURUK
+(menjauh dari 1) seiring damping_factor turun lebih jauh (0,8→1,412,
+0,5→1,484) -- KEBALIKAN dari pola §17 poin 6 (dulu ratio membaik seiring
+damping ditambah).
+
+**`spatial_correlation`**: satu-satunya metrik yang masih membaik dgn
+damping (0,175 di `1.0` → 0,199 di `0,5`), tapi kenaikannya landai
+(diminishing returns tajam setelah `0.7`) dan TIDAK cukup untuk
+mengkompensasi kenaikan MAE yang jauh lebih besar secara relatif di step
+12-18.
+
+**Apakah selisih ini noise atau sinyal nyata?** Pipeline ini
+**deterministik sepenuhnya** (dibuktikan lewat reproducibility check §18.5
+-- retrain dgn config sama menghasilkan MAE identik sampai 6 digit
+desimal). Jadi SEMUA selisih di tabel atas BUKAN noise statistik --
+murni efek eksak & 100% reproducible dari formula damping, bukan variasi
+run-to-run. Signifikansi *praktis*-nya beda per rentang step: di step
+2-11 selisihnya sebanding dgn angka <0,2-0,4% yang dianggap "tidak
+signifikan" di perbandingan before/after fix leakage (§18.6) -- praktis
+diabaikan. Di step 15-18 selisihnya 3-10x lebih besar dari baseline itu --
+nyata, bukan derau.
+
+**KESIMPULAN FINAL (menggantikan §17 poin 6)**: `damping_factor=1.0`
+(tanpa redaman) dipilih sebagai **konfigurasi produksi**, dengan alasan
+eksplisit **prioritas horizon panjang** di atas -- BUKAN karena unggul di
+seluruh horizon (ia TIDAK, lihat tabel crossover). **Root cause pergeseran
+dari §17 poin 6** (dulu `0.9` optimal di SEMUA step): noise injection
+(§17 poin 7) ternyata SENDIRIAN sudah menutup sebagian besar gap exposure
+bias yang dulu jadi alasan damping dibutuhkan (§17 poin 4) -- damping
+post-hoc yang dulu perlu buat "mengerem" model yang belum robust ke
+window kotor, sekarang di horizon panjang malah cuma menambah bias
+(menarik forecast ke persistence) tanpa manfaat yang sepadan lagi;
+di horizon pendek-menengah efeknya masih sedikit menguntungkan tapi kecil.
+**Rekomendasi**: PAKAI `damping_factor=1.0` (default, tanpa perlu
+diaktifkan) untuk model saat ini -- JANGAN otomatis pakai `0.9` lagi
+seperti rekomendasi §17, itu sudah usang UNTUK USE-CASE INI. Kalau nanti
+noise_std, skema training, ATAU prioritas horizon (mis. jadi lebih peduli
+step awal) berubah, WAJIB re-sweep ulang & re-evaluasi trade-off per
+rentang step -- jangan asumsikan `1.0` tetap optimal selamanya atau untuk
+semua tujuan.
+
+---

@@ -23,6 +23,12 @@ from ui.terminal_display import make_progress_bar, say_info, say_ok, say_error
 TARGET_COLUMN = f"target_{Config.TARGET_CHANNEL}"
 MIN_WINDOW_SIZE = Config.MIN_WINDOW_SIZE
 
+# Purge/embargo default untuk stratified_monthly_split() (lihat docstring
+# fungsi itu + Config.PURGE_STEPS di config.py untuk alasan lengkap --
+# investigasi temporal leakage sesi ini: window training dekat cutoff bisa
+# menyentuh raw observasi yang sama dengan target test).
+PURGE_STEPS = Config.PURGE_STEPS
+
 # Fitur yang dipakai buat rekonstruksi window mentah dari cache raw waktu
 # noise injection (lihat inject_recursive_style_noise()). anchor_t0 +
 # pixel_id -> posisi start window di cache; n_points -> panjang window
@@ -39,44 +45,108 @@ def load_expanding_dataset(path):
     return df
 
 
-def stratified_monthly_split(df, test_frac=None, time_col="anchor_t0"):
+def stratified_monthly_split(df, test_frac=None, time_col="anchor_t0", purge_steps=None):
     """
     Split train/test PER-BULAN: di dalam tiap bulan, ambil test_frac fraksi
     TERAKHIR secara kronologis sebagai test -- bukan ekor kronologis dari
     SELURUH dataset seperti chronological split biasa.
 
-    REUSE VERBATIM dari repo lama (lihat header file). Kenapa dibutuhkan:
-    kalau rentang data mencakup banyak bulan, ekor kronologis dari seluruh
-    dataset bisa membuat beberapa bulan (terutama musim konvektif) 0%
-    representasi di test -- model tidak pernah dievaluasi untuk kondisi
-    bulan itu walau datanya penuh di training. Ini persis masalah yang
-    ditemukan di repo lama dan sengaja dihindari dari awal di project ini
-    (CLAUDE.md §6).
+    ASALNYA reuse verbatim dari repo lama (lihat header file), logikanya
+    generic (parameterized time_col). Kenapa dibutuhkan: kalau rentang data
+    mencakup banyak bulan, ekor kronologis dari seluruh dataset bisa membuat
+    beberapa bulan (terutama musim konvektif) 0% representasi di test --
+    model tidak pernah dievaluasi untuk kondisi bulan itu walau datanya
+    penuh di training. Ini persis masalah yang ditemukan di repo lama dan
+    sengaja dihindari dari awal di project ini (CLAUDE.md §6).
 
     Tetap kronologis DI DALAM tiap grup bulan (bukan random) supaya tidak
     ada kebocoran temporal dalam bulan yang sama -- cuma unit
     stratifikasinya yang berubah (per-bulan, bukan seluruh dataset).
+
+    PURGE/EMBARGO (ditambahkan sesi ini, TIDAK ADA di versi repo lama --
+    lihat investigasi temporal leakage): karena window expanding untuk step
+    besar bisa menjangkau sampai ANCHOR_SPAN-1 titik (230 menit dgn default
+    MIN_WINDOW_SIZE=6/HORIZON_STEPS=18) ke DEPAN dari `anchor_t0`-nya
+    sendiri, anchor train yang `anchor_t0`-nya terlalu dekat ke `cutoff_time`
+    bisa punya window/target yang menyentuh raw observasi yang secara waktu
+    sudah masuk wilayah test -- bahkan bisa jadi nilai yang PERSIS SAMA
+    dengan target salah satu test row (temporal leakage, dibuktikan lewat
+    simulasi terhadap kode ini sendiri).
+
+    Purge DUA SISI, diterapkan LINTAS BULAN (bukan per grup bulan yang
+    independen):
+    1. SISI SEBELUM cutoff: anchor train dgn `anchor_t0` kurang dari
+       `purge_steps * Config.FREQ_MINUTES` menit sebelum `cutoff_time`
+       bulan itu -- ini kasus "biasa" (window training menjangkau maju ke
+       wilayah test bulan yang sama).
+    2. SISI SETELAH anchor test terakhir suatu bulan: ditemukan lewat
+       validasi (validate_no_leakage.py) bahwa anchor test PALING AKHIR di
+       suatu bulan (mis. akhir Januari) bisa punya window/target yang
+       menjorok ke bulan BERIKUTNYA (mis. awal Februari) -- karena
+       `df.groupby("__bulan")` memproses tiap bulan independen, anchor awal
+       Februari yang notabene train (jauh dari cutoff Februari SENDIRI)
+       ternyata bisa berbagi raw value dengan target test Januari yang
+       menjorok itu. Fix: anchor mana pun (bulan apa pun) dgn `anchor_t0`
+       dalam `purge_steps * Config.FREQ_MINUTES` menit SETELAH anchor test
+       terakhir bulan sebelumnya juga di-purge. Tanpa sisi ini, purge cuma
+       menutup separuh mekanisme leakage yang terbukti ada.
+
+    `cutoff_time` & definisi TEST **TIDAK BERUBAH** oleh purge ini (tetap
+    persis `anchor_t0 >= cutoff_time`, dihitung dari `test_frac` yang sama
+    seperti sebelumnya) -- purge HANYA mengurangi train, supaya
+    `select_test_anchors()` (recursive_eval.py, yang manggil fungsi INI
+    dengan parameter default yang sama) otomatis tetap menghasilkan anchor
+    test yang identik dengan sebelum purge ditambahkan.
+
+    PRECONDITION (implisit, TIDAK di-assert di sini -- lihat catatan audit):
+    perhitungan interval purge memakai batas tertutup `cutoff_time -
+    FREQ_MINUTES` sebagai pengganti batas terbuka `< cutoff_time` (begitu
+    juga sisi setelah). Ini HANYA benar kalau seluruh nilai `time_col` di
+    `df` grid-aligned -- kelipatan `Config.FREQ_MINUTES` dari origin yang
+    SAMA (mis. semuanya kelipatan 10 menit dari titik nol yang sama).
+    Selalu benar untuk `df` yang berasal dari `dataset_builder.build_dataset()`
+    (timeline dibangun via `pd.date_range(freq=...)`, sudah diverifikasi
+    lewat `validate_no_leakage.py` termasuk skenario gap/sparse-month) --
+    TIDAK dijamin kalau fungsi ini suatu saat dipanggil dengan `df` dari
+    sumber lain yang `time_col`-nya tidak seragam grid-nya.
 
     Parameters
     ----------
     test_frac : float, optional. Default None -> pakai Config.TEST_FRAC (0.15).
     time_col : str, default "anchor_t0" (beda dari repo lama yang pakai
         "base_time", karena skema kolom expanding window beda -- lihat
-        dataset_builder.py).
+        dataset_builder.py). WAJIB grid-aligned per `Config.FREQ_MINUTES`
+        (lihat PRECONDITION di atas).
+    purge_steps : int, optional. Default None -> pakai Config.PURGE_STEPS
+        (= Config.ANCHOR_SPAN - 1, batas konservatif -- lihat penjelasan di
+        atas & Config.PURGE_STEPS di config.py). purge_steps=0 mengembalikan
+        perilaku LAMA (tanpa purge sama sekali) -- disediakan untuk keperluan
+        perbandingan/debugging, BUKAN default produksi.
 
     Return
     ------
     (train_df, test_df, cutoffs) -- `cutoffs` adalah dict
-    {str(bulan): cutoff_time}.
+    {str(bulan): cutoff_time}. `cutoff_time` tetap batas test seperti
+    sebelumnya (BUKAN batas purge) -- dipertahankan supaya caller yang sudah
+    ada (mis. select_test_anchors) tidak perlu berubah.
     """
     if test_frac is None:
         test_frac = Config.TEST_FRAC
+    if purge_steps is None:
+        purge_steps = PURGE_STEPS
 
     df = df.copy()
     df["__bulan"] = df[time_col].dt.to_period("M")
+    purge_delta = pd.Timedelta(minutes=purge_steps * Config.FREQ_MINUTES)
 
-    train_parts, test_parts = [], []
+    # --- Pass 1: tentukan cutoff_time & zona test PER BULAN dulu. Zona
+    # purge dikumpulkan sebagai interval waktu (bukan langsung difilter di
+    # sini), karena zona purge "sisi setelah" milik bulan m HARUS diterapkan
+    # ke baris bulan m+1 juga -- filtering per-grup independen (loop lama)
+    # tidak bisa menjangkau baris di grup lain.
     cutoffs = {}
+    purge_intervals = []  # list of (start, end), interval TERTUTUP [start, end] yang di-drop dari train
+    is_test = pd.Series(False, index=df.index)
 
     for bulan, group in df.groupby("__bulan"):
         unique_times = sorted(group[time_col].unique())
@@ -87,11 +157,34 @@ def stratified_monthly_split(df, test_frac=None, time_col="anchor_t0"):
         cutoff_time = unique_times[cutoff_idx]
         cutoffs[str(bulan)] = cutoff_time
 
-        train_parts.append(group[group[time_col] < cutoff_time])
-        test_parts.append(group[group[time_col] >= cutoff_time])
+        test_mask_bulan = group[time_col] >= cutoff_time
+        is_test.loc[group.index[test_mask_bulan]] = True
+        last_test_time = group.loc[test_mask_bulan, time_col].max()
 
-    train_df = pd.concat(train_parts).drop(columns="__bulan").sort_values(time_col).reset_index(drop=True)
-    test_df = pd.concat(test_parts).drop(columns="__bulan").sort_values(time_col).reset_index(drop=True)
+        # Sisi sebelum cutoff (zona purge: [cutoff_time - purge_delta, cutoff_time)).
+        purge_intervals.append((cutoff_time - purge_delta, cutoff_time - pd.Timedelta(minutes=Config.FREQ_MINUTES)))
+        # Sisi setelah anchor test terakhir bulan ini (zona purge:
+        # (last_test_time, last_test_time + purge_delta] -- bisa menjorok ke
+        # bulan berikutnya, makanya diterapkan global di Pass 2, bukan cuma
+        # ke `group` bulan ini).
+        purge_intervals.append((last_test_time + pd.Timedelta(minutes=Config.FREQ_MINUTES), last_test_time + purge_delta))
+
+    # --- Pass 2: TRAIN = baris yang BUKAN test DAN tidak jatuh di interval
+    # purge manapun (dicek lintas SELURUH df, bukan per grup bulan). ---
+    is_purged = pd.Series(False, index=df.index)
+    for start, end in purge_intervals:
+        if start > end:
+            continue  # interval kosong (mis. purge_steps=0), lewati
+        is_purged |= (df[time_col] >= start) & (df[time_col] <= end)
+
+    train_df = (
+        df[(~is_test) & (~is_purged)]
+        .drop(columns="__bulan").sort_values(time_col).reset_index(drop=True)
+    )
+    test_df = (
+        df[is_test]
+        .drop(columns="__bulan").sort_values(time_col).reset_index(drop=True)
+    )
     return train_df, test_df, cutoffs
 
 

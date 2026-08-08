@@ -41,7 +41,10 @@ TARGET_COLUMN = f"target_{TARGET_CHANNEL}"
 # sampai target OS18) = 24 titik berturut-turut tanpa gap. Lihat CLAUDE.md §2 & §4.
 MIN_WINDOW_SIZE = Config.MIN_WINDOW_SIZE
 HORIZON_STEPS = Config.HORIZON_STEPS
-ANCHOR_SPAN = MIN_WINDOW_SIZE - 1 + HORIZON_STEPS + 1  # = 24
+# ANCHOR_SPAN disentralkan ke Config (satu sumber kebenaran) karena sekarang
+# juga dipakai model_training.py buat purge/embargo stratified_monthly_split()
+# -- lihat Config.ANCHOR_SPAN / Config.PURGE_STEPS di config.py.
+ANCHOR_SPAN = Config.ANCHOR_SPAN  # = MIN_WINDOW_SIZE + HORIZON_STEPS = 24
 
 # Offset dari `anchor` (start) ke `end` window IS1 (step=1), relatif ke
 # titik pertama window. IS1 punya MIN_WINDOW_SIZE titik (indeks 0-based

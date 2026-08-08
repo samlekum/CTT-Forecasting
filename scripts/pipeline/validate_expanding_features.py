@@ -1,4 +1,4 @@
-# ./scripts/tools/validate_expanding_features.py
+# ./scripts/pipeline/validate_expanding_features.py
 # Validasi correctness engine closed-form (expanding_features.py) vs
 # implementasi naive (loop Python + np.polyfit). WAJIB dijalankan dan
 # hasilnya identik (toleransi floating point kecil) sebelum closed-form

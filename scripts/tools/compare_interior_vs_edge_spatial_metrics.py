@@ -30,12 +30,11 @@ _SCRIPTS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_ROOT not in sys.path:
     sys.path.insert(0, _SCRIPTS_ROOT)
 
-import numpy as np
 import pandas as pd
 
 from pipeline.config import Config
 from pipeline.dataset_builder import load_raw_cache
-from pipeline.recursive_eval import spatial_collapse_ratio, spatial_correlation
+from pipeline.recursive_eval import _spatial_metrics_per_step
 from ui.terminal_display import banner, gap, hr, say_info, say_ok, say_error
 
 
@@ -50,28 +49,14 @@ def parse_args():
 
 
 def _spatial_metrics_for_subset(detail_df, label):
-    """Reuse definisi PERSIS sama seperti pipeline.recursive_eval._spatial_metrics_per_step
-    (grouping per (model, step, anchor_t0), min 2 pixel per grup), tapi
-    dipanggil terpisah buat subset pixel tertentu (full vs interior)."""
-    rows = []
-    for (model, step, t0), group in detail_df.groupby(["model", "step", "anchor_t0"]):
-        if len(group) < 2:
-            continue
-        rows.append({
-            "model": model,
-            "step": step,
-            "anchor_t0": t0,
-            "collapse_ratio": spatial_collapse_ratio(group["y_pred"].values, group["y_true"].values),
-            "correlation": spatial_correlation(group["y_pred"].values, group["y_true"].values),
-        })
-    if not rows:
-        return pd.DataFrame(columns=["model", "step", "spatial_collapse_ratio", "spatial_correlation", "n_t0_groups"])
-    per_t0 = pd.DataFrame(rows)
-    summary = per_t0.groupby(["model", "step"]).agg(
-        spatial_collapse_ratio=("collapse_ratio", "mean"),
-        spatial_correlation=("correlation", "mean"),
-        n_t0_groups=("collapse_ratio", "size"),
-    ).reset_index()
+    """Wrapper tipis di atas pipeline.recursive_eval._spatial_metrics_per_step
+    (fungsi CANONICAL, satu-satunya tempat logika grouping (model, step,
+    anchor_t0) + filter min 2 pixel per grup didefinisikan) -- cuma nambah
+    kolom "subset" biar hasil full vs interior bisa dibedain di CSV
+    perbandingan. TIDAK reimplementasi logic-nya sendiri (dulu ada duplikat
+    persis, sekarang dihapus supaya kalau definisi spatial_collapse_ratio/
+    correlation berubah lagi, cuma satu tempat yang perlu diubah)."""
+    summary = _spatial_metrics_per_step(detail_df)
     summary["subset"] = label
     return summary
 

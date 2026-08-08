@@ -55,6 +55,7 @@ forecast_output/
 
 # Visualization Output
 visualizations/
+_backup_before_leakage_fix_20260808_202804
 
 # Graphify
 graphify-out/cache/

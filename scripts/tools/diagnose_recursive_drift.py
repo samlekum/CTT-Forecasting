@@ -53,15 +53,14 @@ from pipeline.config import Config
 from pipeline.expanding_features import FEATURE_COLUMNS
 from pipeline.dataset_builder import load_raw_cache
 from pipeline.model_training import load_expanding_dataset
-from pipeline.expanding_features import compute_window_features_matrix
 from pipeline.recursive_eval import (
     MIN_WINDOW_SIZE,
-    HORIZON_STEPS,
     TARGET_COLUMN,
     select_test_anchors,
     _map_anchors_to_indices,
+    run_recursive_evaluation,
 )
-from ui.terminal_display import banner, gap, hr, say_info, say_ok, say_error, make_progress_bar
+from ui.terminal_display import banner, gap, hr, say_info, say_ok, say_error
 
 
 def parse_args():
@@ -88,50 +87,6 @@ def parse_args():
         help="Margin (K) dari target_min/target_max training buat dianggap 'mentok batas'. Default: 0.5.",
     )
     return p.parse_args()
-
-
-def _rollout_with_features(model_name, model, anchors_idx, data_matrix, timeline):
-    """Ulang recursive rollout -- SAMA PERSIS logikanya dengan
-    pipeline.recursive_eval.run_recursive_evaluation() -- tapi kali ini
-    fitur per step (bukan cuma prediksi) ikut disimpan, buat dibandingkan
-    sama distribusi fitur training (poin B)."""
-    starts = anchors_idx["start_idx"].values
-    pixel_cols = anchors_idx["pixel_col"].values
-
-    series = np.stack([
-        data_matrix[s : s + MIN_WINDOW_SIZE, p]
-        for s, p in zip(starts, pixel_cols)
-    ])  # shape (n_anchor, MIN_WINDOW_SIZE)
-
-    feature_records = []
-    pred_records = []
-    step_progress = make_progress_bar(range(1, HORIZON_STEPS + 1), desc=f"Rollout+fitur [{model_name}]", unit="step")
-    for step in step_progress:
-        L = series.shape[1]
-        features_df = compute_window_features_matrix(series)
-        y_pred = model.predict(features_df)
-
-        target_idx = starts + L
-        y_true = data_matrix[target_idx, pixel_cols]
-
-        snap = features_df.copy()
-        snap["step"] = step
-        feature_records.append(snap)
-
-        pred_records.append(pd.DataFrame({
-            "model": model_name,
-            "pixel_id": anchors_idx["pixel_id"].values,
-            "anchor_t0": anchors_idx["anchor_t0"].values,
-            "step": step,
-            "y_true": y_true,
-            "y_pred": y_pred,
-        }))
-
-        # Extend window pakai prediksi sendiri -- ini yang bikin fitur step
-        # berikutnya makin lama makin "asing" buat model (poin B).
-        series = np.concatenate([series, y_pred.reshape(-1, 1)], axis=1)
-
-    return pd.concat(feature_records, ignore_index=True), pd.concat(pred_records, ignore_index=True)
 
 
 def diagnose_runaway_pixels(pred_df, target_min, target_max, clamp_margin, steps_to_check):
@@ -255,7 +210,14 @@ def main():
 
         say_info(f"Rollout ulang + capture fitur: {model_name}")
         model = joblib.load(model_path)
-        rollout_features_df, pred_df = _rollout_with_features(model_name, model, anchors_idx, data_matrix, timeline)
+        # damping_factor=1.0 (tanpa redaman) -- diagnostic ini dari sesi
+        # SEBELUM damping ada, tujuannya lihat drift MENTAH model, bukan
+        # efek setelah diredam. Pakai rollout canonical (recursive_eval.py)
+        # dgn capture_features=True, BUKAN implementasi rollout terpisah.
+        pred_df, rollout_features_df = run_recursive_evaluation(
+            model_name, model, anchors_idx, data_matrix, timeline,
+            damping_factor=1.0, capture_features=True,
+        )
 
         runaway = diagnose_runaway_pixels(pred_df, target_min, target_max, args.clamp_margin, steps_to_check)
         runaway["model"] = model_name

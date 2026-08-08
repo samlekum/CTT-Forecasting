@@ -97,6 +97,23 @@ class Config:
     EXPANDING_DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
     EXPANDING_DATASET_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_features.csv")
 
+    # Cache raw time series (data_matrix + timeline + pixel_meta) hasil baca
+    # NetCDF di 02_build_expanding_features.py. Disimpan sekali di sini biar
+    # 04_recursive_evaluate.py TIDAK perlu baca ulang 34rb+ file .nc (yang
+    # makan ~12.5 jam I/O -- lihat catatan performa sesi ini) buat dapetin
+    # nilai mentah tbb_13 per titik. Format .npz (numpy compressed).
+    EXPANDING_RAW_CACHE_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_raw_cache.npz")
+
+    # Direktori & file output evaluasi recursive (Tahap 5 / 04_recursive_evaluate.py).
+    # recursive_evaluation.csv = detail per (model, pixel_id, anchor_t0, step).
+    # recursive_mae_summary.csv = ringkasan MAE (+ std prediksi vs std observasi
+    # asli, buat ngecek spatial collapse) per (model, step). Format ini SENGAJA
+    # dibuat gampang di-extend kolom (mis. reliability calibration) belakangan
+    # tanpa re-arsitektur, sesuai CLAUDE.md §7.
+    EXPANDING_EVAL_DIR = os.path.join(PROJECT_ROOT, "evaluation")
+    RECURSIVE_EVAL_DETAIL_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_evaluation.csv")
+    RECURSIVE_EVAL_SUMMARY_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_mae_summary.csv")
+
     # Direktori output model hasil training (Tahap 3) & ringkasan metrik.
     # Dipakai model_training.py / 03_train_models.py. Path model per-model:
     # {EXPANDING_MODELS_DIR}/{model_name}.joblib. Ringkasan metrik gabungan:

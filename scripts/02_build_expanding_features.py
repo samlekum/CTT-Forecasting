@@ -37,6 +37,14 @@ def parse_args():
             "karena langsung full-run tanpa validasi subset). Contoh: --max-files 200."
         ),
     )
+    p.add_argument(
+        "--no-cache", action="store_true",
+        help=(
+            "Skip nyimpen cache raw time series (.npz) yang dibutuhkan "
+            "04_recursive_evaluate.py. Default: cache DISIMPAN. Pakai flag ini "
+            "cuma buat smoke-test cepat yang nggak perlu lanjut ke recursive eval."
+        ),
+    )
     return p.parse_args()
 
 
@@ -64,6 +72,7 @@ def main():
             output_path=output_path,
             anchor_stride=args.anchor_stride,
             max_files=args.max_files,
+            cache_path=False if args.no_cache else None,
         )
     except ValueError as e:
         say_error(str(e))

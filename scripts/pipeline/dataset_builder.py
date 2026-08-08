@@ -258,7 +258,53 @@ def build_pixel_samples(y, anchors, pixel_id, pixel_lat, pixel_lon, timeline):
     return df
 
 
-def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None, max_files=None):
+def save_raw_cache(cache_path, data_matrix, timeline, pixel_meta):
+    """Simpan data_matrix + timeline + pixel_meta ke .npz supaya tahap lain
+    (04_recursive_evaluate.py) bisa pakai nilai mentah tbb_13 tanpa baca
+    ulang ribuan file .nc (I/O paling berat di pipeline ini -- lihat catatan
+    performa sesi ini, ~12.5 jam untuk 34rb file).
+
+    timeline (DatetimeIndex) disimpan sebagai int64 nanoseconds supaya aman
+    di npz (npz tidak native support datetime64), dikonversi balik pas load.
+    pixel_meta (DataFrame kecil, <=beberapa ratus baris) disimpan per-kolom.
+    """
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    # PENTING: pakai np.array(..., dtype="<U32") eksplisit, BUKAN
+    # arr.astype(str). Di numpy>=2.0, .astype(str) pada array object bisa
+    # menghasilkan StringDType (variable-length) yang disimpan sebagai
+    # object array di .npz -- gagal di-load dengan allow_pickle=False.
+    # Fixed-width unicode ("<U32") aman untuk npz tanpa pickle.
+    pixel_id_arr = np.array(pixel_meta["pixel_id"].values, dtype="<U32")
+    np.savez_compressed(
+        cache_path,
+        data_matrix=data_matrix.astype(np.float32),  # float32 cukup untuk TBB (Kelvin), hemat ~separuh ukuran file
+        timeline_ns=timeline.values.astype("datetime64[ns]").astype(np.int64),
+        pixel_id=pixel_id_arr,
+        lat_idx=pixel_meta["lat_idx"].values,
+        lon_idx=pixel_meta["lon_idx"].values,
+        latitude=pixel_meta["latitude"].values,
+        longitude=pixel_meta["longitude"].values,
+    )
+
+
+def load_raw_cache(cache_path):
+    """Kebalikan dari save_raw_cache(). Return (data_matrix, timeline, pixel_meta)
+    dengan tipe data sama seperti yang di-return load_pixel_grid()/build_uniform_timeline()."""
+    npz = np.load(cache_path, allow_pickle=False)
+    data_matrix = npz["data_matrix"].astype(np.float64)
+    timeline = pd.to_datetime(npz["timeline_ns"])
+    pixel_meta = pd.DataFrame({
+        "pixel_id": npz["pixel_id"].astype("<U32").astype(str),
+        "lat_idx": npz["lat_idx"],
+        "lon_idx": npz["lon_idx"],
+        "latitude": npz["latitude"],
+        "longitude": npz["longitude"],
+    })
+    return data_matrix, timeline, pixel_meta
+
+
+def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None,
+                   max_files=None, cache_path=None):
     """Fungsi utama: baca semua file NetCDF di `data_dir`, generate dataset
     training expanding window untuk semua pixel, gabung jadi satu DataFrame.
 
@@ -287,6 +333,12 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
         CATATAN: karena dipotong secara kronologis dari awal, anchor dekat
         ujung potongan bakal ke-skip otomatis oleh gap-skip rule (§4) --
         ini WAJAR untuk smoke-test, bukan bug.
+    cache_path : str, optional
+        Kalau diisi (atau default None -> Config.EXPANDING_RAW_CACHE_FILE),
+        simpan data_matrix + timeline + pixel_meta mentah ke .npz di path
+        ini setelah selesai baca NetCDF, dipakai 04_recursive_evaluate.py.
+        Pass False eksplisit untuk skip caching (mis. smoke-test cepat yang
+        nggak perlu cache).
 
     Return
     ------
@@ -299,6 +351,8 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
         anchor_stride = Config.ANCHOR_STRIDE_DEFAULT
     if freq_minutes is None:
         freq_minutes = Config.FREQ_MINUTES
+    if cache_path is None:
+        cache_path = Config.EXPANDING_RAW_CACHE_FILE
 
     entries = discover_nc_files(data_dir)
     if not entries:
@@ -312,6 +366,10 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
 
     timeline = build_uniform_timeline(entries, freq_minutes=freq_minutes)
     data_matrix, pixel_meta = load_pixel_grid(entries, timeline)
+
+    if cache_path:
+        save_raw_cache(cache_path, data_matrix, timeline, pixel_meta)
+        say_info(f"Cache raw time series disimpan ke: {cache_path}")
 
     all_samples = []
     total_anchors = 0

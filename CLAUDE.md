@@ -234,7 +234,10 @@ sebelum dikoding.
    (grid 5x7, gap file hilang + gap cloud-mask NaN disengaja) — cross-check
    manual numpy match persis, gap-skip rule dibuktikan nggak ada anchor yang
    overlap posisi NaN. Lihat §12 untuk keputusan desain yang diambil di sini.
-4. ✅ **SELESAI** — `pipeline/model_training.py` + `scripts/03_train_models.py` —
+4. ✅ **SELESAI** — `pipeline/model_training.py` + `scripts/03_train_model.py`
+   (PENTING: nama file aktual **singular** `03_train_model.py`, bukan
+   `03_train_models.py` -- typo lama di dokumen ini & di header komentar
+   file itu sendiri sudah dibenerin sesi ini) —
    `stratified_monthly_split()` di-reuse VERBATIM dari repo lama (cuma
    `time_col` diganti jadi `"anchor_t0"`), training 3 model (xgboost/
    lightgbm/catboost, SVR di-drop sesuai §5), save `.joblib` +
@@ -243,8 +246,30 @@ sebelum dikoding.
    bulan: cutoff per-bulan bekerja (semua bulan punya representasi di
    test set, bukan 0% kayak masalah repo lama), training end-to-end
    jalan, model tersimpan valid. Lihat §13 untuk detail keputusan desain.
-5. **BELUM** — `pipeline/recursive_eval.py` — evaluasi recursive per t0, hitung MAE per
-   step.
+
+   **Full run pertama** (34.420 file .nc, 13.621.230 baris, 8 bulan data):
+   xgboost MAE=2.505K RMSE=4.514K R²=0.9711 (204.7s), lightgbm MAE=2.517K
+   R²=0.9710 (79.7s, tercepat), catboost MAE=2.522K R²=0.9711 (227.9s).
+   **PENTING**: ini metrik FLAT/teacher-forced (semua step 1-18 dicampur
+   di satu test set, window SELALU observasi real) -- BUKAN performa
+   recursive sebenarnya. Lihat hasil recursive di §15.
+
+   **Temuan performa (full run ini)**: closed-form vectorized feature
+   engineering di `expanding_features.py` cuma makan **~10 detik** untuk
+   35 pixel (sesuai klaim §10 poin 2). TAPI loop baca 34.420 file `.nc`
+   satu-satu (`xr.open_dataset()` di `load_pixel_grid()`) makan **12 jam
+   29 menit** (~1.3 detik/file) -- total waktu proses 02 jadi 45.222 detik
+   (~12.5 jam), justru LEBIH LAMA dari `03a_build_features.py` di repo
+   lama (10 jam+) yang jadi alasan awal project ini dibuat (§1, §11).
+   Bottleneck-nya SEKARANG di I/O baca file, BUKAN di compute. Belum
+   dibenahi sesi ini (scope sesi ini fokus ke `recursive_eval.py`) --
+   kandidat perbaikan sesi berikutnya: paralelkan `load_pixel_grid()`
+   (tiap file independen, cocok `ProcessPoolExecutor`/`ThreadPoolExecutor`),
+   dan/atau checkpointing tiap N file (run 12.5 jam tanpa save
+   intermediate itu berisiko kalau crash di tengah).
+5. ✅ **SELESAI** — `pipeline/recursive_eval.py` (`scripts/04_recursive_evaluate.py`)
+   — evaluasi recursive per t0, hitung MAE per step 1-18. Lihat §15 untuk
+   detail desain & keputusan.
 
 ---
 
@@ -381,5 +406,137 @@ yang sepadan di repo lama yang benar sebelum desain dari nol.
   BELUM divalidasi ke dataset asli hasil `dataset_builder.py` (karena
   `02_build_expanding_features.py` belum ada) -- WAJIB dicoba di data
   asli sebelum dianggap final produksi.
+
+---
+
+## 15. Keputusan Desain Tambahan (dari sesi implementasi `recursive_eval.py`)
+
+**PENTING -- cek preseden dulu**: repo lama (koreksi §12) ternyata PUNYA
+`pipeline/recursive_eval.py` (`scripts/05_recursive_evaluation.py`).
+Beberapa konsep di-adopsi/disamakan namanya di sini; beberapa TIDAK bisa
+langsung di-port karena skema window beda total (expanding vs fixed
+sliding). Rincian di bawah.
+
+### Masalah inti: window recursive butuh raw values, bukan cuma fitur agregat
+
+`expanding_features.csv` cuma nyimpen 9 fitur teragregasi (mean/std/slope/
+dll), bukan nilai mentah per titik. Buat recursive eval, window mulai step
+2 harus di-extend pakai HASIL PREDIKSI model sendiri (bukan observasi real
+lagi) -- butuh nilai mentah buat recompute 9 fitur tiap step.
+
+**Solusi yang dipilih Dhika**: `dataset_builder.build_dataset()` sekarang
+JUGA nyimpen cache raw time series (`data_matrix` + `timeline` +
+`pixel_meta`) ke `.npz` (`Config.EXPANDING_RAW_CACHE_FILE`, default
+`dataset/expanding_raw_cache.npz`) via `save_raw_cache()`/`load_raw_cache()`
+di `dataset_builder.py`. Alasan: baca ulang 34rb+ file `.nc` khusus buat
+recursive eval bakal ulang bottleneck I/O 12.5 jam yang udah ditemukan di
+poin 4 atas -- cache bikin `recursive_eval.py` load raw values dalam
+hitungan detik.
+
+**BUG YANG KETEMU & FIX**: numpy>=2.0, `array_of_str.astype(str)` bisa
+menghasilkan `StringDType` (variable-length) yang tersimpan sebagai OBJECT
+array di `.npz` -- gagal di-load dengan `allow_pickle=False` (yang memang
+sengaja dipakai, jangan diubah ke `allow_pickle=True` demi keamanan). Fix:
+pakai `np.array(values, dtype="<U32")` eksplisit (fixed-width unicode) buat
+`pixel_id`, bukan `.astype(str)`. Sudah divalidasi round-trip save/load.
+
+**Trade-off cache**: `data_matrix` disimpan sebagai `float32` (bukan
+`float64`) buat hemat ukuran file -- introduce presisi hilang ~1e-5 K
+(divalidasi: fitur step=1 hasil recursive_eval dibanding fitur step=1 di
+CSV asli, max diff antar kolom ~1e-5, murni floating point round-off,
+BUKAN bug logika). Diterima karena jauh di bawah presisi sensor TBB.
+
+### Kenapa slope tetap valid pakai indeks lokal (bukan global)
+
+`expanding_features.py` (training) hitung slope pakai `t` = indeks GLOBAL
+(posisi di timeline penuh per pixel). `recursive_eval.py` hitung ulang
+fitur tiap step dari window LOKAL yang tumbuh (`series` array per anchor,
+mulai `MIN_WINDOW_SIZE` titik, +1 tiap step) pakai `t` = indeks LOKAL
+(0..L-1). Ini VALID karena slope regresi linear invarian terhadap
+pergeseran konstan pada `t` (slope = Cov(t,y)/Var(t), keduanya tidak
+berubah kalau `t` digeser rata) -- fitur lain (mean/std/min/max/first/last)
+sama sekali nggak bergantung pada `t`, jadi otomatis identik juga. Divalidasi
+numerik: fitur step=1 lokal vs fitur step=1 tersimpan di CSV cocok dalam
+toleransi float32 (lihat poin di atas).
+
+### Vectorisasi: per-anchor lintas step TIDAK bisa, lintas anchor BISA
+
+Beda dari `expanding_features.py` (butuh cumsum trick karena window bisa
+berapa pun panjang & jutaan anchor sekaligus per pixel), di sini window
+SELALU sama panjang untuk semua anchor pada step yang sama (expanding
+window tumbuh sinkron), jadi fitur dihitung full-recompute tiap step
+langsung pakai numpy `axis=1` di atas matrix `(n_anchor, L)` -- TANPA
+cumsum, karena `L` maksimal cuma 23 (murah). Step k+1 butuh hasil step k
+(prediksi jadi titik window berikutnya) -- ini SATU-SATUNYA bagian yang
+sekuensial (loop Python 18 iterasi per model), lintas ANCHOR tetap
+vectorized penuh di tiap iterasi.
+
+### Pemilihan anchor test set
+
+`select_test_anchors()` panggil `stratified_monthly_split()` PERSIS SAMA
+seperti `03_train_model.py` (bukan split baru) -- anchor yang dievaluasi
+recursive adalah anchor yang SAMA yang jadi test set training, biar hasil
+recursive eval konsisten dibandingkan sama metrik flat di §4 (metrik flat
+"kepake" evaluasi di data yang sama, recursive eval juga).
+
+**BEDA dari repo lama** (`select_valid_t0`/`select_valid_t0_stratified`,
+yang milih t0 BERSAMA lintas SEMUA pixel via `_is_valid_t0` -- karena
+fixed-window model lama itu joint-model semua pixel sekaligus): expanding
+window ini modelnya per-pixel independen (§8, HANYA `tbb_13`, single
+series), jadi anchor dipilih independen per pixel dari test set yang udah
+ada, TIDAK perlu constraint "semua pixel valid di t0 yang sama".
+
+### Metrik spasial (`spatial_collapse_ratio`, `spatial_correlation`) -- diadopsi dari repo lama
+
+Awalnya cuma direncanakan MAE per step (CLAUDE.md §7). Tapi setelah cek
+preseden repo lama (`pipeline/recursive_eval.py` di sana), ketemu
+`spatial_collapse_ratio()` (std prediksi / std aktual ANTAR PIXEL, di
+anchor_t0+step yang sama) dan `spatial_correlation()` -- metrik ini
+LANGSUNG menjawab masalah utama yang jadi alasan project ini di-rebuild
+(§1: "prediction standard deviation collapsed dramatically across
+recursive steps, spatial correlation dropping to near zero by step 2").
+MAE saja TIDAK bisa mendeteksi model yang "rata"/flat secara spasial tapi
+tetap MAE rendah. Naming & formula disamakan persis dengan repo lama.
+
+Implementasi: `_spatial_metrics_per_step()` group `detail_df` per
+(model, step, anchor_t0), filter grup dengan >=2 pixel (anchor_t0 yang
+cuma valid di 1 pixel di-skip -- gap-skip rule per-pixel bisa bikin nggak
+semua pixel valid bareng di anchor_t0 yang sama), hitung ratio & korelasi
+per grup, lalu rata-ratakan lintas anchor_t0 per (model, step). Kolom
+`n_t0_groups` di summary nunjukin berapa banyak anchor_t0 yang kepakai --
+kalau kecil/0, hati-hati interpretasi (statistik nggak stabil).
+
+### Output & format (extensible sesuai CLAUDE.md §7)
+
+- `Config.RECURSIVE_EVAL_DETAIL_FILE` (`evaluation/recursive_evaluation.csv`):
+  long-format, satu baris per (model, pixel_id, anchor_t0, step) --
+  kolom: model, pixel_id, anchor_t0, step, target_time, y_true, y_pred,
+  abs_error. Gampang di-extend kolom nanti (mis. reliability calibration)
+  tanpa re-arsitektur.
+- `Config.RECURSIVE_EVAL_SUMMARY_FILE` (`evaluation/recursive_mae_summary.csv`):
+  satu baris per (model, step) -- kolom: mae, rmse, n_samples, pred_std,
+  true_std (variance keseluruhan, BEDA dari spatial_collapse_ratio --
+  ini nyampur variasi antar-anchor & antar-pixel jadi satu, cuma indikator
+  kasar tambahan), spatial_collapse_ratio, spatial_correlation, n_t0_groups.
+
+### Divalidasi
+
+Dataset sintetis grid 4x4 (16 pixel), 40 timestamp tanpa gap, pola spasial
+tetap per pixel: `build_dataset()` (dgn cache) → `train_all_models()` →
+`run_all_models()` (recursive eval) end-to-end jalan tanpa error, 96 anchor
+test, `spatial_collapse_ratio`/`spatial_correlation` konsisten stabil
+0.9-0.99 (data sintetis sederhana, wajar korelasinya tetap tinggi). Fitur
+step=1 lokal vs CSV asli cocok dalam toleransi float32 (~1e-5 K, lihat
+poin cache di atas). **BELUM divalidasi di dataset asli 13.6 juta baris**
+(karena itu butuh re-run `02_build_expanding_features.py` buat generate
+cache-nya dulu -- dataset lama belum punya cache) -- WAJIB dicoba di data
+asli sebelum dianggap final. Lihat instruksi re-run di respons chat sesi ini.
+
+### Belum dikerjakan / di luar scope sesi ini
+
+- Perbaikan bottleneck I/O `load_pixel_grid()` (lihat catatan performa di
+  poin 4) -- kandidat: paralelisasi baca file, checkpointing.
+- `pipeline/inference.py` / `05_run_inference.py` -- BELUM dibahas sama
+  sekali, jangan diasumsikan desainnya (§10).
 
 ---

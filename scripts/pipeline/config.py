@@ -129,6 +129,16 @@ class Config:
     # ternyata kegedean -- lihat CLAUDE.md §12.
     ANCHOR_STRIDE_DEFAULT = 1
 
+    # Jumlah proses paralel default untuk baca file NetCDF di
+    # dataset_builder.load_pixel_grid() (Tahap 2). Bottleneck sebelumnya:
+    # loop sekuensial 34.420 file makan ~12.5 jam (I/O/parse-bound, bukan
+    # compute -- lihat CLAUDE.md §10 poin 4). Default: semua core kecuali 1
+    # (biar OS/proses lain tetap responsif). Override lewat --workers di
+    # 02_build_expanding_features.py atau param n_workers eksplisit kalau
+    # mau tuning (mis. workers lebih dikit kalau I/O disk jadi bottleneck
+    # duluan sebelum CPU, bukan sebaliknya).
+    NETCDF_READ_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+
     @classmethod
     def validate(cls):
         """Validasi semua env var wajib terisi, dan laporkan nama-nama yang belum diisi."""

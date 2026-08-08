@@ -17,10 +17,12 @@
 
 import os
 import logging
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from pipeline.config import Config
 from pipeline.netcdf_tools import extract_time_from_filename
@@ -29,7 +31,7 @@ from pipeline.expanding_features import (
     compute_expanding_window_features,
     FEATURE_COLUMNS,
 )
-from ui.terminal_display import make_progress_bar, say_info
+from ui.terminal_display import make_progress_bar, say_info, say_error
 
 TARGET_CHANNEL = Config.TARGET_CHANNEL
 TARGET_COLUMN = f"target_{TARGET_CHANNEL}"
@@ -95,10 +97,68 @@ def build_uniform_timeline(entries, freq_minutes=None):
     return timeline
 
 
-def load_pixel_grid(entries, timeline):
+def _read_netcdf_worker(path, target_channel, canonical_shape):
+    """Worker TOP-LEVEL (bukan closure) dipanggil di proses terpisah lewat
+    ProcessPoolExecutor untuk baca SATU file NetCDF. Harus di top-level
+    module supaya bisa di-pickle dan dikirim ke worker process lain.
+
+    KENAPA ProcessPoolExecutor, BUKAN ThreadPoolExecutor: library HDF5/netCDF4
+    C di balik `xr.open_dataset()` pada build default TIDAK thread-safe
+    (thread-safety HDF5 cuma aktif kalau library-nya dikompilasi eksplisit
+    dengan --enable-threadsafe, jarang jadi default paket binary). Baca
+    paralel via banyak thread Python di satu proses BERISIKO crash/korupsi
+    diam-diam. Proses terpisah aman karena tiap worker punya instance
+    HDF5/netCDF4 sendiri, tidak share state C library apapun.
+
+    Return
+    ------
+    (values_flat, status) -- values_flat: np.ndarray 1D hasil ravel() kalau
+    sukses, None kalau gagal. status: None (sukses), "missing_channel",
+    "shape_mismatch", atau "error:<pesan>" (exception apapun saat baca/buka).
+    """
+    try:
+        with xr.open_dataset(path) as ds:
+            if target_channel not in ds.variables:
+                return None, "missing_channel"
+            values = ds[target_channel].values
+            if canonical_shape is not None and values.shape != canonical_shape:
+                return None, "shape_mismatch"
+            return values.ravel(), None
+    except Exception as e:
+        return None, f"error:{e}"
+
+
+def load_pixel_grid(entries, timeline, n_workers=None):
     """Baca semua file NetCDF, ekstrak nilai tbb_13 tiap pixel, susun jadi
     matrix (T, P) di mana T = panjang timeline, P = jumlah pixel (flatten
     grid lat x lon).
+
+    DIBACA PARALEL (ProcessPoolExecutor, lihat _read_netcdf_worker untuk
+    alasan proses bukan thread) -- ini bottleneck I/O paling berat di
+    seluruh Tahap 2 (12.5 jam untuk 34.420 file kalau sekuensial murni,
+    lihat CLAUDE.md §10 poin 4; bottleneck-nya di overhead buka/parse tiap
+    file, BUKAN compute, jadi paralelisasi lintas proses langsung nyerang
+    akar masalahnya).
+
+    Alur 2 fase:
+    1. SEKUENSIAL, cepat: scan entries satu-satu sampai ketemu file valid
+       PERTAMA (punya target_channel, berhasil dibuka) -- dipakai nentuin
+       canonical_shape & grid lat/lon, yang dibutuhkan SEBELUM data_matrix
+       bisa dialokasikan dan sebelum file lain bisa divalidasi shape-nya.
+       File yang di-skip di fase ini (missing channel / gagal baca) TIDAK
+       dibaca ulang di fase 2.
+    2. PARALEL: sisa file (setelah file valid pertama) dibaca lintas proses
+       via ProcessPoolExecutor.map(). Hasil di-assign balik ke data_matrix
+       di proses utama pakai t_idx -- aman tanpa lock karena tiap file
+       nulis ke baris berbeda (t_idx unik per timestamp).
+
+    Parameters
+    ----------
+    n_workers : int, optional
+        Jumlah proses paralel. Default None -> Config.NETCDF_READ_WORKERS.
+        n_workers <= 1 -> fallback sekuensial murni (skip overhead spawn
+        ProcessPoolExecutor sama sekali) -- berguna untuk smoke-test file
+        sedikit atau debugging.
 
     Return
     ------
@@ -107,27 +167,30 @@ def load_pixel_grid(entries, timeline):
     pixel_meta : pd.DataFrame, shape (P, ...), kolom lat_idx/lon_idx/latitude/
         longitude untuk tiap pixel (urutan sejajar dengan kolom data_matrix).
     """
+    if n_workers is None:
+        n_workers = Config.NETCDF_READ_WORKERS
+
     timeline_index = {ts: i for i, ts in enumerate(timeline)}
     T = len(timeline)
 
+    # --- Fase 1 (sekuensial): cari file valid PERTAMA buat nentuin
+    # canonical_shape & grid lat/lon. WAJIB sekuensial -- semua file lain
+    # butuh nilai ini buat dialokasikan/divalidasi. Biasanya cuma butuh
+    # baca 1 file (kecuali file-file awal korup/nggak punya channel), jadi
+    # murah dibanding total keseluruhan.
     canonical_shape = None
     canonical_lat = None
     canonical_lon = None
     data_matrix = None
     n_mismatched = 0
     n_missing_channel = 0
+    n_errors = 0
+    first_valid_pos = None  # posisi di `entries`, BUKAN t_idx
 
-    # Loop I/O paling berat di seluruh Tahap 2 (baca ratusan/ribuan file
-    # NetCDF satu-satu) -- WAJIB ada progress bar biar keliatan jalan,
-    # bukan cuma diem. Pakai make_progress_bar (style sama kayak Tahap 1).
-    progress = make_progress_bar(entries, desc="Baca NetCDF", unit="file")
-    for ts, path in progress:
+    for pos, (ts, path) in enumerate(entries):
         t_idx = timeline_index.get(ts)
         if t_idx is None:
-            # Timestamp di luar rentang timeline (seharusnya nggak terjadi
-            # karena timeline dibangun dari min/max entries, tapi dijaga).
             continue
-
         try:
             with xr.open_dataset(path) as ds:
                 if TARGET_CHANNEL not in ds.variables:
@@ -135,39 +198,93 @@ def load_pixel_grid(entries, timeline):
                     continue
 
                 values = ds[TARGET_CHANNEL].values
-
-                if canonical_shape is None:
-                    canonical_shape = values.shape
-                    # latitude/longitude di dataset adalah koordinat 1D
-                    # (panjang = jumlah baris/kolom grid), bukan grid penuh.
-                    # Meshgrid dulu supaya sejajar 1:1 dengan pixel hasil
-                    # ravel() dari `values` (row-major: lat berubah lambat,
-                    # lon berubah cepat).
-                    lat_1d = ds["latitude"].values
-                    lon_1d = ds["longitude"].values
-                    lat_mesh, lon_mesh = np.meshgrid(lat_1d, lon_1d, indexing="ij")
-                    canonical_lat = lat_mesh.ravel()
-                    canonical_lon = lon_mesh.ravel()
-                    P = int(np.prod(canonical_shape))
-                    data_matrix = np.full((T, P), np.nan, dtype=np.float64)
-
-                if values.shape != canonical_shape:
-                    # Grid menyimpang dari canonical -> anggap gap penuh
-                    # untuk timestamp ini (biarkan NaN, jangan dipaksa reshape).
-                    n_mismatched += 1
-                    continue
-
+                canonical_shape = values.shape
+                # latitude/longitude di dataset adalah koordinat 1D (panjang
+                # = jumlah baris/kolom grid), bukan grid penuh. Meshgrid dulu
+                # supaya sejajar 1:1 dengan pixel hasil ravel() dari `values`
+                # (row-major: lat berubah lambat, lon berubah cepat).
+                lat_1d = ds["latitude"].values
+                lon_1d = ds["longitude"].values
+                lat_mesh, lon_mesh = np.meshgrid(lat_1d, lon_1d, indexing="ij")
+                canonical_lat = lat_mesh.ravel()
+                canonical_lon = lon_mesh.ravel()
+                P = int(np.prod(canonical_shape))
+                data_matrix = np.full((T, P), np.nan, dtype=np.float64)
                 data_matrix[t_idx, :] = values.ravel()
-
+                first_valid_pos = pos
         except Exception as e:
+            n_errors += 1
             logging.warning(f"Gagal baca {path}: {e}")
             continue
+        # Hanya sampai sini kalau try-block sukses TANPA `continue` di
+        # tengah (channel ketemu, data_matrix ke-set) -- baru berhenti scan.
+        break
 
     if data_matrix is None:
         raise ValueError(
             f"Tidak ada satupun file yang punya variabel '{TARGET_CHANNEL}' -- "
             "cek nama channel atau isi data_bandung/."
         )
+
+    # --- Fase 2 (paralel): sisa file setelah file valid pertama. ---
+    remaining = []
+    for pos in range(first_valid_pos + 1, len(entries)):
+        ts, path = entries[pos]
+        t_idx = timeline_index.get(ts)
+        if t_idx is None:
+            continue
+        remaining.append((t_idx, path))
+
+    if remaining:
+        if n_workers <= 1:
+            # Fallback sekuensial murni -- tanpa overhead spawn proses.
+            progress = make_progress_bar(remaining, desc="Baca NetCDF", unit="file")
+            for t_idx, path in progress:
+                values_flat, status = _read_netcdf_worker(path, TARGET_CHANNEL, canonical_shape)
+                if status == "missing_channel":
+                    n_missing_channel += 1
+                elif status == "shape_mismatch":
+                    n_mismatched += 1
+                elif status is not None:
+                    n_errors += 1
+                    logging.warning(f"Gagal baca {path}: {status}")
+                else:
+                    data_matrix[t_idx, :] = values_flat
+        else:
+            # Chunksize: task-nya kecil (buka 1 file) tapi jumlahnya bisa
+            # puluhan ribu -- submit satu future per file itu mahal karena
+            # overhead IPC (pickle/unpickle) per-task. Kelompokkan beberapa
+            # file per chunk supaya overhead itu diamortisasi.
+            chunksize = max(1, len(remaining) // (n_workers * 4))
+            say_info(
+                f"Baca NetCDF paralel: {len(remaining)} file tersisa, "
+                f"{n_workers} proses, chunksize={chunksize}"
+            )
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                results_iter = executor.map(
+                    _read_netcdf_worker,
+                    [path for _t_idx, path in remaining],
+                    [TARGET_CHANNEL] * len(remaining),
+                    [canonical_shape] * len(remaining),
+                    chunksize=chunksize,
+                )
+                progress = tqdm(
+                    zip(remaining, results_iter),
+                    total=len(remaining),
+                    desc="Baca NetCDF (paralel)",
+                    bar_format="{desc} |{bar}| {n_fmt}/{total_fmt} file [{elapsed}<{remaining}]",
+                    ncols=80,
+                )
+                for (t_idx, path), (values_flat, status) in progress:
+                    if status == "missing_channel":
+                        n_missing_channel += 1
+                    elif status == "shape_mismatch":
+                        n_mismatched += 1
+                    elif status is not None:
+                        n_errors += 1
+                        logging.warning(f"Gagal baca {path}: {status}")
+                    else:
+                        data_matrix[t_idx, :] = values_flat
 
     if n_mismatched > 0:
         logging.warning(
@@ -177,6 +294,11 @@ def load_pixel_grid(entries, timeline):
     if n_missing_channel > 0:
         logging.warning(
             f"{n_missing_channel} file tidak punya variabel '{TARGET_CHANNEL}', dilewati."
+        )
+    if n_errors > 0:
+        say_error(
+            f"{n_errors} file gagal dibaca (exception saat buka/parse) -- "
+            "lihat log warning untuk detail per file, dianggap gap."
         )
 
     lat_idx_grid, lon_idx_grid = np.meshgrid(
@@ -304,7 +426,7 @@ def load_raw_cache(cache_path):
 
 
 def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minutes=None,
-                   max_files=None, cache_path=None):
+                   max_files=None, cache_path=None, n_workers=None):
     """Fungsi utama: baca semua file NetCDF di `data_dir`, generate dataset
     training expanding window untuk semua pixel, gabung jadi satu DataFrame.
 
@@ -339,6 +461,10 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
         ini setelah selesai baca NetCDF, dipakai 04_recursive_evaluate.py.
         Pass False eksplisit untuk skip caching (mis. smoke-test cepat yang
         nggak perlu cache).
+    n_workers : int, optional
+        Jumlah proses paralel untuk baca file NetCDF (lihat load_pixel_grid).
+        Default None -> Config.NETCDF_READ_WORKERS. Set 1 untuk fallback
+        sekuensial murni.
 
     Return
     ------
@@ -365,7 +491,7 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
     say_info(f"Total file .nc yang akan dibaca: {len(entries)}")
 
     timeline = build_uniform_timeline(entries, freq_minutes=freq_minutes)
-    data_matrix, pixel_meta = load_pixel_grid(entries, timeline)
+    data_matrix, pixel_meta = load_pixel_grid(entries, timeline, n_workers=n_workers)
 
     if cache_path:
         save_raw_cache(cache_path, data_matrix, timeline, pixel_meta)

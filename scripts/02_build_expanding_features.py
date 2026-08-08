@@ -45,6 +45,16 @@ def parse_args():
             "cuma buat smoke-test cepat yang nggak perlu lanjut ke recursive eval."
         ),
     )
+    p.add_argument(
+        "--workers", type=int, default=None,
+        help=(
+            "Jumlah proses paralel untuk baca file NetCDF. Default: "
+            "Config.NETCDF_READ_WORKERS (semua core kecuali 1). Set --workers 1 "
+            "untuk fallback sekuensial murni (mis. debug, atau kalau I/O disk "
+            "sudah jadi bottleneck duluan sebelum CPU sehingga paralel tidak "
+            "nambah kecepatan)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -59,6 +69,7 @@ def main():
     say_info(f"Folder data   : {data_dir}")
     say_info(f"Output CSV    : {output_path}")
     say_info(f"Anchor stride : {args.anchor_stride or cfg.ANCHOR_STRIDE_DEFAULT}")
+    say_info(f"Workers baca  : {args.workers or cfg.NETCDF_READ_WORKERS}")
     if args.max_files is not None:
         say_info(f"Mode          : SMOKE-TEST, hanya {args.max_files} file pertama (kronologis)")
     else:
@@ -73,6 +84,7 @@ def main():
             anchor_stride=args.anchor_stride,
             max_files=args.max_files,
             cache_path=False if args.no_cache else None,
+            n_workers=args.workers,
         )
     except ValueError as e:
         say_error(str(e))

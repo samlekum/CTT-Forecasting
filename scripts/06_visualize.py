@@ -68,6 +68,9 @@ def main():
     except (FileNotFoundError, ValueError) as e:
         say_error(str(e))
         return
+    except KeyboardInterrupt:
+        say_info("Dibatalkan.")
+        return
 
     gap()
     banner("RINGKASAN VISUALISASI")

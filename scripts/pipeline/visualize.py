@@ -15,6 +15,7 @@
 
 import os
 import re
+import sys
 import json
 from datetime import datetime
 
@@ -31,7 +32,7 @@ from PIL import Image
 
 from pipeline.config import Config
 from pipeline.inference import CSV_COLUMNS, load_raw_values_lookup
-from ui.terminal_display import say_info, say_ok, say_error, banner, make_progress_bar
+from ui.terminal_display import say_info, say_ok, say_error, banner, make_progress_bar, _c
 
 FREQ_MINUTES = Config.FREQ_MINUTES
 
@@ -127,13 +128,87 @@ def discover_forecast_files(forecast_dir=None):
     return df
 
 
+def _numbered_input_select(labels):
+    """Fallback menu (ketik angka + Enter) -- dipakai kalau terminal
+    TIDAK interaktif (stdin/stdout bukan TTY, mis. dijalankan non-
+    interaktif/piped/CI) atau bukan Windows (menu panah pakai `msvcrt`,
+    stdlib khusus Windows -- lihat _interactive_menu_select())."""
+    for i, label in enumerate(labels):
+        say_info(f"[{i + 1}] {label}")
+    n = len(labels)
+    while True:
+        raw = input(f"Pilih nomor (1-{n}): ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= n:
+            return int(raw) - 1
+        say_error(f"Input tidak valid: '{raw}'. Masukkan angka 1-{n}.")
+
+
+def _interactive_menu_select(labels):
+    """Menu navigasi panah atas/bawah / PageUp/PageDown, Enter buat pilih
+    -- dipakai buat pilih file forecast tanpa ketik angka (diminta Dhika).
+    Windows-only (`msvcrt`, stdlib bawaan Windows, TANPA dependency baru)
+    -- fallback otomatis ke `_numbered_input_select()` kalau bukan Windows
+    atau stdin/stdout bukan TTY interaktif (mis. dijalankan lewat pipe).
+
+    Return
+    ------
+    int -- index (0-based) label yang dipilih.
+    """
+    if os.name != "nt" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return _numbered_input_select(labels)
+
+    import msvcrt
+
+    idx = 0
+    n = len(labels)
+
+    def render(first=False):
+        if not first:
+            sys.stdout.write(f"\033[{n}A")  # cursor naik n baris, redraw di tempat sama
+        for i, label in enumerate(labels):
+            marker = "> " if i == idx else "  "
+            line = f"{marker}{label}"
+            if i == idx:
+                line = _c("1;36", line)
+            sys.stdout.write("\033[K" + line + "\n")  # \033[K = clear sisa baris lama
+        sys.stdout.flush()
+
+    say_info("Navigasi: panah atas/bawah atau PageUp/PageDown, Enter buat pilih.")
+    render(first=True)
+    while True:
+        ch = msvcrt.getch()
+        if ch in (b"\xe0", b"\x00"):  # prefix byte tombol khusus (panah/PgUp/PgDn)
+            ch2 = msvcrt.getch()
+            if ch2 == b"H":       # Up
+                idx = (idx - 1) % n
+            elif ch2 == b"P":     # Down
+                idx = (idx + 1) % n
+            elif ch2 == b"I":     # Page Up
+                idx = max(0, idx - 5)
+            elif ch2 == b"Q":     # Page Down
+                idx = min(n - 1, idx + 5)
+            else:
+                continue
+            render()
+        elif ch in (b"\r", b"\n"):  # Enter
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return idx
+        elif ch in (b"\x1b", b"\x03"):  # Esc / Ctrl+C -- batalkan
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            raise KeyboardInterrupt("Dibatalkan user.")
+        # tombol lain diabaikan
+
+
 def prompt_select_forecast_file(candidates_df):
     """Pilih 1 baris dari discover_forecast_files(). 0 hasil -> raise
     ValueError (caller/06_visualize.py tangkap & say_error, berhenti
     otomatis, TIDAK traceback, TIDAK nunggu input). 1 hasil -> langsung
     dipakai, skip prompt (tapi tetap say_info file mana yang dipakai --
-    transparansi). >1 hasil -> list bernomor (run terbaru di atas),
-    input() sampai user masukkan angka valid."""
+    transparansi). >1 hasil -> menu navigasi panah/PageUp-PageDown + Enter
+    (lihat _interactive_menu_select(), fallback ketik-angka kalau tidak
+    memungkinkan), terurut run_ts DESCENDING (run terbaru di atas)."""
     if candidates_df.empty:
         raise ValueError(
             "Tidak ada file forecast berpola baru "
@@ -146,17 +221,14 @@ def prompt_select_forecast_file(candidates_df):
         return row
 
     banner("PILIH HASIL FORECAST")
-    for i, row in candidates_df.iterrows():
-        say_info(
-            f"[{i + 1}] model={row['model_name']}  t0={row['t0_ts']}  "
-            f"run={row['run_ts']}  ({row['filename']})"
-        )
-    n = len(candidates_df)
-    while True:
-        raw = input(f"Pilih nomor (1-{n}): ").strip()
-        if raw.isdigit() and 1 <= int(raw) <= n:
-            return candidates_df.iloc[int(raw) - 1]
-        say_error(f"Input tidak valid: '{raw}'. Masukkan angka 1-{n}.")
+    labels = [
+        f"model={row['model_name']}  t0={row['t0_ts']}  run={row['run_ts']}  ({row['filename']})"
+        for _, row in candidates_df.iterrows()
+    ]
+    idx = _interactive_menu_select(labels)
+    selected = candidates_df.iloc[idx]
+    say_ok(f"Dipilih: {selected['filename']}")
+    return selected
 
 
 # ============================================================================

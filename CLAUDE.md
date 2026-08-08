@@ -2053,7 +2053,48 @@ Semua fix di §20.14 (bug empty-CSV) di-regression-test ULANG dari
 (empty-CSV -> error bersih, normal path + `--mask-outside-bandung` ->
 13/35 pixel, threshold/per-step/2-desimal semua masih benar).
 
-### 20.15 Belum dikerjakan / di luar scope sesi ini
+### 20.15 Menu pilih file forecast: navigasi panah/PageUp-PageDown (revisi, sesi lanjutan)
+
+Diminta Dhika: ganti menu "ketik angka + Enter" jadi navigasi panah
+atas/bawah atau PageUp/PageDown, Enter buat pilih (spt style menu pilihan
+umumnya).
+
+**Implementasi** (`pipeline/visualize.py`):
+- `_interactive_menu_select(labels)` -- pakai `msvcrt` (stdlib BAWAAN
+  Windows, TANPA dependency baru spt `questionary`/`inquirer`/`pick`,
+  yang beberapa malah TIDAK support Windows native atau butuh
+  `windows-curses` tambahan). Baca keypress mentah (`msvcrt.getch()`),
+  redraw menu di tempat yang sama pakai ANSI cursor-up (`\033[{n}A`) +
+  clear-line (`\033[K`) -- ANSI sudah kepakai di `ui/terminal_display.py`
+  (`_c()`) jadi terminal target sudah pasti support. Baris terpilih
+  di-highlight (prefix `> ` + warna cyan tebal `_c("1;36", ...)`).
+  Mapping tombol: Up=`\xe0H`, Down=`\xe0P`, PageUp=`\xe0I` (loncat 5),
+  PageDown=`\xe0Q` (loncat 5), Enter=pilih, Esc/Ctrl+C=batal
+  (`KeyboardInterrupt`). Up/Down wrap-around (dari item terakhir tekan
+  Down balik ke item pertama), PageUp/PageDown clamp di batas (TIDAK
+  wrap -- beda perilaku disengaja, PageUp/PageDown itu "loncat", bukan
+  "puter").
+- **Fallback otomatis** ke `_numbered_input_select(labels)` (perilaku
+  LAMA, ketik angka + Enter) kalau: bukan Windows (`os.name != "nt"`,
+  `msvcrt` cuma ada di Windows) ATAU stdin/stdout bukan TTY interaktif
+  (mis. dijalankan via pipe/non-interaktif/CI) -- guard INI yang bikin
+  fitur baru aman dites lewat tool otomatis (Bash tool session Claude
+  ini BUKAN TTY asli, jadi otomatis lewat fallback, bukan crash).
+- `prompt_select_forecast_file()` disederhanakan: label tanpa prefix
+  `[N]` lagi (nomor tidak relevan lagi di menu panah), tinggal
+  `model=... t0=... run=... (filename)`.
+- `06_visualize.py::main()` tangkap `KeyboardInterrupt` tambahan (Esc
+  batal menu) -> `say_info("Dibatalkan.")` bersih, BUKAN traceback.
+
+**Divalidasi**: fallback (`_numbered_input_select`, jalur yang bisa
+dites otomatis krn Bash tool session ini non-TTY) -- pilih via angka
+tetap jalan end-to-end (menu tampil, render 18 frame, GIF ke-generate,
+tidak ada error). **Navigasi panah/PageUp-PageDown sendiri BELUM bisa
+dites otomatis** (butuh keypress asli di TTY interaktif, di luar
+kemampuan tool sesi ini) -- WAJIB dicoba langsung oleh Dhika di
+terminal asli sebelum dianggap final.
+
+### 20.16 Belum dikerjakan / di luar scope sesi ini
 
 - Scheduling OS-level buat auto-render tiap Stage 05 selesai -- di luar
   scope, tanggung jawab operasional user (sama seperti §19.4).

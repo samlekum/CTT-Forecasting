@@ -22,6 +22,24 @@ def parse_args():
         "--test-frac", type=float, default=None,
         help="Fraksi test per-bulan untuk stratified_monthly_split(). Default: Config.TEST_FRAC (0.15).",
     )
+    p.add_argument(
+        "--noise-std", type=float, default=0.0,
+        help=(
+            "Std deviasi noise Gaussian (Kelvin) yang disuntik ke fitur window "
+            "X_train (bukan X_test) untuk anchor step>1, sebelum training -- "
+            "redesain dari inject_lag_noise() repo lama untuk skema fitur "
+            "closed-form project ini (lihat pipeline/model_training.py::"
+            "inject_recursive_style_noise() untuk desain lengkap). Default 0 = "
+            "tanpa noise (perilaku lama, backward-compatible). Mulai coba dari "
+            "~MAE step-1 aktual (lihat recursive_mae_summary.csv, ~2.5K), lalu "
+            "WAJIB re-run scripts/tools/sweep_damping.py setelah retrain untuk "
+            "cek ulang damping_factor optimal (bisa geser dari 0.9)."
+        ),
+    )
+    p.add_argument(
+        "--cache", default=None,
+        help="Path cache raw .npz, dibutuhkan HANYA kalau --noise-std > 0. Default: Config.EXPANDING_RAW_CACHE_FILE.",
+    )
     return p.parse_args()
 
 
@@ -36,16 +54,31 @@ def main():
     say_info(f"Dataset      : {dataset_path}")
     say_info(f"Folder model : {models_dir}")
     say_info(f"Model        : {', '.join(cfg.MODEL_NAMES)}")
+    if args.noise_std > 0:
+        say_info(f"Noise inject : AKTIF, std={args.noise_std}K pada fitur window X_train (step>1)")
+    else:
+        say_info("Noise inject : nonaktif (--noise-std=0, perilaku lama)")
     hr()
 
     if not os.path.exists(dataset_path):
         say_error(f"Dataset tidak ditemukan: {dataset_path}. Jalankan 02_build_expanding_features.py dulu.")
         return
 
+    cache_path = args.cache or cfg.EXPANDING_RAW_CACHE_FILE
+    if args.noise_std > 0 and not os.path.exists(cache_path):
+        say_error(
+            f"--noise-std > 0 butuh cache raw, tapi tidak ditemukan: {cache_path}\n"
+            "Jalankan 02_build_expanding_features.py dulu (tanpa --no-cache)."
+        )
+        return
+
     df = load_expanding_dataset(dataset_path)
     say_info(f"Total baris dataset: {len(df)}")
 
-    summary_df = train_all_models(df, models_dir=models_dir, test_frac=args.test_frac)
+    summary_df = train_all_models(
+        df, models_dir=models_dir, test_frac=args.test_frac,
+        noise_std=args.noise_std, cache_path=cache_path,
+    )
 
     gap()
     banner("RINGKASAN")

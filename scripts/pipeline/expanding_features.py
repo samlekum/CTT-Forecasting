@@ -9,6 +9,7 @@
 # array time series `y` satu pixel (bukan relatif ke window). n_points = e - s + 1.
 
 import numpy as np
+import pandas as pd
 
 # 9 kolom fitur final (urutan ini dipakai konsisten di seluruh pipeline)
 FEATURE_COLUMNS = [
@@ -197,3 +198,70 @@ def compute_expanding_window_features(y, starts, ends, cumsum_stats=None):
         "slope": slope,
         "n_points": n_points,
     }
+
+
+def compute_window_features_matrix(series_matrix):
+    """Hitung 9 fitur closed-form dari MATRIX window yang SAMA panjangnya
+    (shape (n_window, L)) -- beda dari compute_expanding_window_features()
+    di atas yang butuh SATU time series `y` panjang + banyak (start, end)
+    pasangan arbitrary via cumsum. Versi ini dipakai kalau window-nya sudah
+    di-gather jadi matrix eksplisit (baris = window individual, sudah tidak
+    terikat ke satu `y` per pixel), yaitu di dua tempat:
+
+    1. `recursive_eval.run_recursive_evaluation()` -- window tumbuh dari
+       hasil prediksi model sendiri (rollout), bukan dari cache/`y` biasa.
+    2. `model_training.inject_recursive_style_noise()` -- window di-gather
+       dari cache TAPI mau dinoise per-baris SEBELUM hitung fitur, jadi
+       butuh matrix eksplisit juga (bukan pakai cumsum dari `y` asli).
+
+    Dipisah dari compute_expanding_window_features() (bukan reuse cumsum
+    trick) karena di sini window per baris sudah independen satu sama lain
+    (beda pixel/anchor), full-recompute per window matrix tetap murah untuk
+    window pendek (<=23 titik, lihat CLAUDE.md §15) dan lebih simpel
+    daripada makna window per-anchor lewat cumsum global per pixel.
+
+    Parameters
+    ----------
+    series_matrix : np.ndarray, shape (n_window, L)
+        L = panjang window (SAMA untuk semua baris di panggilan ini).
+
+    Return
+    ------
+    pd.DataFrame, kolom = FEATURE_COLUMNS, baris sejajar dengan series_matrix.
+    """
+    n_window, L = series_matrix.shape
+
+    mean_window = series_matrix.mean(axis=1)
+    var_window = np.clip(series_matrix.var(axis=1), 0.0, None)  # var(ddof=0), guard floating point sama seperti compute_expanding_window_features()
+    std_window = np.sqrt(var_window)
+    min_window = series_matrix.min(axis=1)
+    max_window = series_matrix.max(axis=1)
+    first_value = series_matrix[:, 0]
+    last_value = series_matrix[:, -1]
+    delta_first_last = last_value - first_value
+
+    # Slope pakai t lokal 0..L-1 -- identik dengan t global karena slope
+    # invarian terhadap pergeseran konstan.
+    t = np.arange(L, dtype=np.float64)
+    t_mean = t.mean()
+    t_centered = t - t_mean
+    denom = np.sum(t_centered**2)
+    if denom == 0:  # L == 1, harusnya nggak pernah kejadian (MIN_WINDOW_SIZE >= 3 dijamin config), guard saja
+        slope = np.zeros(n_window)
+    else:
+        numer = ((series_matrix - mean_window[:, None]) * t_centered).sum(axis=1)
+        slope = numer / denom
+
+    n_points = np.full(n_window, float(L))
+
+    return pd.DataFrame({
+        "mean_window": mean_window,
+        "std_window": std_window,
+        "min_window": min_window,
+        "max_window": max_window,
+        "first_value": first_value,
+        "last_value": last_value,
+        "delta_first_last": delta_first_last,
+        "slope": slope,
+        "n_points": n_points,
+    })[FEATURE_COLUMNS]

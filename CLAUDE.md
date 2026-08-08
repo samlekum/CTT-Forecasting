@@ -683,10 +683,19 @@ kalau dependency itu diterima).
 smoke-test 500 file di §16). Tahap 02→03→04 semua jalan tanpa error.
 Ditemukan bug nyata di hasil recursive eval (`spatial_collapse_ratio`
 NAIK jauh di atas 1, bukan turun ke 0 seperti masalah repo lama).
-Investigasi 4 tools diagnostic (`scripts/tools/`) sudah dilakukan.
-**FIX SUDAH DIIMPLEMENTASI** (damping geometris, lihat poin 4) tapi
-**BELUM DIVALIDASI dengan re-run** -- itu tugas paling urgent sesi
-berikutnya (lihat "Belum dikerjakan" di akhir section ini).
+Investigasi 4 tools diagnostic (`scripts/tools/`) sudah dilakukan. Fix
+damping geometris diimplementasi (poin 4) DAN **SUDAH DIVALIDASI** lewat
+sweep 6 nilai damping_factor di model & data asli (poin 6) --
+**`damping_factor=0.9` terbukti optimal** (MAE turun, bukan naik, sambil
+motong ~49% kelebihan `spatial_collapse_ratio`). TAPI damping doang
+**TIDAK CUKUP** buat nutup gap sepenuhnya (ratio plateau di ~1.55,
+correlation plateau di ~0.19 walau damping_factor diturunin sampai 0.5) --
+next step urgent sesi depan: **noise injection** ke fitur turunan window.
+**UPDATE**: desain + implementasi noise injection (poin 7) SUDAH SELESAI &
+smoke-tested (fixture kecil, bukan data asli) -- next step urgent sesi
+depan sekarang jadi RETRAIN pakai `--noise-std` di data asli, DIIKUTI
+re-sweep `damping_factor` pakai model hasil retrain (lihat "Belum
+dikerjakan" di akhir section ini).
 
 ### 1. Hasil full run 02→03→04 (data asli, BUKAN sintetis)
 
@@ -816,25 +825,164 @@ Detail lain:
   project ini justru "ratio menjauh dari 1 ke ATAS". Sekarang jelasin
   kedua arah.
 
+### 6. Hasil sweep damping_factor + kesimpulan (SUDAH divalidasi, model & data asli)
+
+Divalidasi pakai `scripts/tools/sweep_damping.py` (tool baru, load cache +
+model SEKALI lalu loop `run_recursive_evaluation()` per faktor -- lebih
+cepat daripada manual re-run `04_recursive_evaluate.py` per nilai. TIDAK
+retrain, TIDAK rebuild dataset 02, sama seperti poin 5. Total sweep 6
+faktor (`1.0, 0.9, 0.8, 0.7, 0.6, 0.5`) makan ~13.5 menit buat 113.610
+anchor test x 3 model x 18 step). Output: `evaluation/damping_sweep_comparison.csv`
+(semua faktor x model x step) + `evaluation/recursive_evaluation_dampXX.csv` /
+`recursive_mae_summary_dampXX.csv` per faktor (suffix sama seperti poin 5).
+
+**MAE step 18, per faktor (konsisten di ketiga model)**:
+
+| damping_factor | xgboost | lightgbm | catboost |
+|---|---|---|---|
+| 1.0 (baseline) | 14.325 | 13.982 | 14.171 |
+| **0.9** | **13.699** | **13.548** | **13.548** |
+| 0.8 | 13.933 | 13.873 | 13.868 |
+| 0.7 | 14.099 | 14.065 | 14.066 |
+| 0.6 | 14.202 | 14.181 | 14.184 |
+| 0.5 | 14.273 | 14.258 | 14.261 |
+
+**Temuan kunci**:
+- **`damping_factor=0.9` adalah titik MINIMUM MAE di ketiga model** --
+  BUKAN cuma "MAE nggak terlalu jelek dibanding baseline", tapi beneran
+  LEBIH RENDAH dari baseline (`1.0`) DAN dari semua faktor lain yang
+  dicoba. Ini di luar ekspektasi awal (biasanya damping = trade-off
+  ratio-vs-MAE) -- ternyata overshoot yang diredam itu sendiri sumber
+  error besar (exposure bias, §17 poin 4), jadi meredam delta mengurangi
+  DUA masalah sekaligus (bukan tukar satu masalah dengan masalah lain).
+- **`spatial_collapse_ratio` & `spatial_correlation` membaik cepat sampai
+  `damping_factor=0.8`, lalu PLATEAU** (diminishing returns tajam).
+  Contoh xgboost, excess ratio di atas 1: `1.0→0.9` turun 49% (1.323→0.675),
+  `0.9→0.8` turun 15% lagi (→0.572), tapi `0.8→0.7→0.6→0.5` cuma turun
+  total ~4% lagi (→0.550, nyaris flat). Pola sama persis di
+  `spatial_correlation` (naik cepat lalu landai).
+  - Di titik paling ekstrem yang dicoba (`0.5`): ratio cuma nyampe **~1.55**
+    (bukan 1) dan correlation cuma **~0.19** (bukan "tinggi" seperti step 1
+    yang ~0.81) -- damping TIDAK BISA menutup gap sepenuhnya, ada floor
+    struktural.
+- **Turun ke bawah `0.8` itu KELIRU secara trade-off** -- MAE terus naik
+  (menjauh dari titik optimal 0.9 DAN dari baseline), sementara
+  ratio/correlation cuma naik recehan (sudah plateau). Nggak ada
+  damping_factor yang menang di semua sisi di bawah 0.8.
+
+**KESIMPULAN**: `damping_factor=0.9` adalah nilai optimal buat
+production (menang MAE + ratio/correlation, tanpa trade-off). TAPI
+damping post-hoc (murni post-processing rollout, poin 5) **PUNYA BATAS
+STRUKTURAL** -- nggak bisa benar-benar nutup gap ratio/correlation ke
+level ideal (step 1), sesuai dugaan awal di "Belum dikerjakan" versi
+sebelumnya. Root cause exposure bias (§17 poin 4) belum tersentuh dari
+akarnya, cuma diredam gejalanya. **Next step wajib: noise injection**
+(lihat "Belum dikerjakan" di bawah).
+
+### 7. Noise injection: DESAIN + IMPLEMENTASI SUDAH SELESAI (BELUM di-retrain pakai data asli)
+
+**STATUS**: kode SUDAH ditulis & di-smoke-test (fixture kecil, dataset asli
+via `build_pixel_samples()` beneran + cache asli, bukan data sintetis
+tebak-tebakan) -- semua invarian tervalidasi (lihat "Divalidasi" di bawah).
+**BELUM dijalankan di model & data asli** (34.420 file, 756.735 anchor) --
+itu tugas #1 sesi depan.
+
+**KENAPA didesain ulang, bukan port `inject_lag_noise()` repo lama**: repo
+lama nyuntik noise Gaussian INDEPENDEN ke tiap kolom lag mentah
+(`tbb_13_t/tm1/tm2`, semua sama-sama unit Kelvin tunggal, gampang). Di sini
+fiturnya 9 kolom AGREGAT window (mean/std/min/max/first/last/delta/
+slope/n_points) -- noise independen per kolom bisa menghasilkan kombinasi
+yang secara fisik nggak mungkin (mis. `min_window > max_window`, atau
+`std_window` nggak sinkron sama `mean_window`/`slope`-nya), yang justru
+bisa bikin model belajar pola yang SALAH, bukan robust.
+
+**Desain yang dipakai** (di `pipeline/model_training.py::inject_recursive_style_noise()`):
+1. Untuk tiap baris training (train_df, PUNYA `pixel_id`/`anchor_t0`/
+   `n_points`), rekonstruksi window MENTAH dari cache raw (`.npz`) --
+   teknik SAMA persis dengan yang dipakai `recursive_eval.py` buat window
+   awal (IS1).
+2. Titik window di posisi **> `MIN_WINDOW_SIZE`** (yaitu titik yang di
+   kondisi recursive SUNGGUHAN bakal diisi prediksi model, bukan observasi
+   real -- window step 1 selalu 100% real) ditambah noise Gaussian i.i.d.
+   `N(0, noise_std)`. Titik 0..`MIN_WINDOW_SIZE-1` (window IS1) TIDAK
+   pernah dinoise -- baris step 1 (`n_points == MIN_WINDOW_SIZE`) jadi
+   no-op total.
+3. Ke-9 fitur DIHITUNG ULANG dari window yang sudah dinoise, pakai fungsi
+   closed-form yang SAMA dengan `recursive_eval.py` (lihat "Refactor
+   pendukung" di bawah) -- ini yang jamin konsistensi fisik antar fitur
+   (bukan sekadar nempel noise ke tabel fitur).
+4. Hanya `X_train` yang dinoise, `X_test` TETAP bersih/real -- evaluasi
+   flat (§13) tetap apple-to-apple, efek noise cuma keliatan lewat
+   recursive eval (Tahap 04).
+5. `noise_std <= 0` = no-op murni, backward-compatible (divalidasi byte-
+   identik lewat smoke-test, lihat "Divalidasi").
+
+**Refactor pendukung** (biar nggak duplikasi logika closed-form dari
+window matrix): fungsi `_compute_window_features_local()` yang tadinya
+private di `pipeline/recursive_eval.py` (§15) DIPINDAH & dijadiin public
+`compute_window_features_matrix()` di `pipeline/expanding_features.py`
+(modul yang nggak punya dependency ke modul pipeline lain, jadi aman
+diimport dari `recursive_eval.py` DAN `model_training.py` tanpa circular
+import -- `model_training.py` juga sekarang import `load_raw_cache` dari
+`dataset_builder.py`, juga aman karena `dataset_builder.py` nggak
+dependency ke `model_training.py`). `scripts/tools/diagnose_recursive_drift.py`
+(§17 poin 3) ikut di-update importnya biar konsisten (fungsi lama yang
+dihapus dari `recursive_eval.py` bakal bikin ImportError kalau nggak
+di-update).
+
+**CLI baru** (`03_train_models.py`):
+```
+python .\03_train_models.py --noise-std 2.5
+```
+`--noise-std` default `0.0` (nonaktif, perilaku lama). `--cache` opsional
+(default `Config.EXPANDING_RAW_CACHE_FILE`), WAJIB ada file-nya kalau
+`--noise-std > 0`. `training_summary.csv` sekarang punya kolom tambahan
+`noise_std` buat traceability model mana dilatih dengan noise berapa.
+
+**Nilai awal yang disaranin buat dicoba**: mulai dari **~2.5** (seukuran
+MAE step-1 aktual di `damping_factor=0.9`, lihat §17 poin 6 -- ~2.5-2.6K
+di ketiga model), BUKAN diagreb dari 0. WAJIB di-sweep (coba beberapa
+nilai: 1.5, 2.5, 4.0, dst), bukan asal pilih satu angka -- pola yang sama
+kayak damping_factor (ada titik optimal, terlalu besar bisa bikin model
+under-fit ke sinyal asli / MAE flat naik banyak).
+
+**Divalidasi** (smoke-test, `build_pixel_samples()` asli + cache asli,
+4 pixel x 122 anchor x 18 step, BUKAN model/data asli):
+- `noise_std=0` -> `train_df` dikembalikan IDENTIK (no-op sempurna,
+  `df.equals()` True).
+- Baris step 1 (`n_points == MIN_WINDOW_SIZE`) IDENTIK sebelum/sesudah
+  noise (`np.allclose` True) -- window 100% real nggak disentuh.
+- Baris step > 1 BERUBAH signifikan setelah noise (`noise_std=1.5` ->
+  rata-rata |Δmean_window| ~0.23K).
+- Konsistensi fisik terjaga 100% di SEMUA baris noised:
+  `min_window <= mean_window/first_value/last_value <= max_window`.
+- `n_points` dan kolom target TIDAK berubah (cuma 9 fitur closed-form
+  yang diganti).
+- End-to-end `03_train_models.py --noise-std 1.5` jalan tanpa error,
+  MAE flat test set naik (0.067K -> 0.37K di xgboost, WAJAR karena model
+  belajar toleransi ke window "kotor" -- test set TETAP bersih, jadi
+  kenaikan MAE flat ini BUKAN indikasi bug, cuma trade-off yang
+  diharapkan; robustness-nya baru keliatan lewat MAE per-step recursive,
+  BELUM dicek di data asli).
+
 ### Belum dikerjakan / di luar scope sesi ini -- URGENT buat sesi depan
 
-- **Re-run `04_recursive_evaluate.py --damping-factor <nilai>` dengan
-  model asli & data asli BELUM DILAKUKAN.** Ini prioritas #1 sesi depan
-  -- run cuma makan ~5-12 detik (bukan jam), jadi bisa coba beberapa
-  nilai (mulai dari 0.9, turun bertahap ke 0.8/0.7 kalau perlu) dan
-  bandingkan `spatial_collapse_ratio`/`spatial_correlation`/MAE per step
-  vs baseline (`evaluation/recursive_evaluation.csv` yang sudah ada,
-  damping_factor=1.0). Cari titik yang collapse_ratio & correlation udah
-  stabil deket 1 tapi MAE nggak jauh lebih jelek dari baseline.
-- **Kalau damping saja nggak cukup** (mis. MAE korban terlalu besar demi
-  ratio bagus): opsi lanjutan yang BELUM dikerjakan -- noise injection ke
-  fitur turunan window (`std_window`, `slope`, `last_value`, dst) SEBELUM
-  training, biar model belajar robust ke window "asing" dari awal. Ada
-  preseden di repo lama (`inject_lag_noise()` di
-  `Bandung-Weather-Forecast-Himawari-09/scripts/pipeline/model_training.py`)
-  tapi BUKAN implementasi verbatim -- skema fitur beda (9 fitur closed-form
-  di sini vs lag mentah di repo lama), perlu didesain ulang, bukan
-  copy-paste. Ini butuh retrain (~10 menit, TIDAK perlu rebuild 02).
+- **Retrain dengan `--noise-std` di data & model ASLI (34.420 file,
+  756.735 anchor) BELUM DILAKUKAN.** Ini prioritas #1 sesi depan. Kode &
+  desain sudah selesai (poin 7) -- cuma tinggal jalanin
+  `python .\03_train_models.py --noise-std 2.5` (mulai dari situ, coba
+  beberapa nilai lain juga), makan waktu training ~10 menit per run
+  (BUKAN jam, TIDAK perlu rebuild dataset 02).
+- **Setelah retrain, WAJIB re-run `scripts/tools/sweep_damping.py` lagi**
+  (bukan cuma `04_recursive_evaluate.py` default) buat cek apakah
+  `damping_factor=0.9` (§17 poin 6) masih optimal dengan model baru yang
+  udah robust ke noise, atau optimal-nya geser (kemungkinan BISA geser,
+  karena model baru mungkin nggak butuh redaman seagresif sebelumnya).
+- Kalau hasil noise_std tertentu bagus (ratio/correlation membaik LEBIH
+  jauh dari plateau ~1.55/~0.19 di §17 poin 6, TANPA MAE flat naik
+  kelewat parah), PERTIMBANGKAN sweep gabungan (noise_std x
+  damping_factor) buat cari kombinasi optimal, bukan tuning satu-satu
+  terpisah.
 - **CATATAN soal memori/klaim "exponential damping" dari sesi sebelumnya
   di luar chat ini**: sempat disebut ada fix serupa ("exponential
   damping") di repo lama dari fixes #8-#9 -- SUDAH DICEK, TIDAK ketemu di
@@ -842,15 +990,19 @@ Detail lain:
   itu perubahan lokal Dhika yang belum di-push). Damping di §17 poin 5 ini
   didesain dari nol berdasarkan diagnosis sesi ini, BUKAN port dari kode
   lama yang terverifikasi.
-- Kalau nanti damping_factor optimal sudah ketemu, PERTIMBANGKAN update
-  `Config` (`pipeline/config.py`) buat nyimpen nilai defaultnya di sana
-  (sekarang default CLI masih hardcode `1.0` di `04_recursive_evaluate.py`,
-  belum tersentralisasi kayak pola config lain di project ini).
+- **`damping_factor=0.9` optimal SUDAH ketemu (poin 6) -- PERTIMBANGKAN
+  update `Config`** (`pipeline/config.py`) buat nyimpen nilai defaultnya
+  di sana (sekarang default CLI masih hardcode `1.0` di
+  `04_recursive_evaluate.py`, belum tersentralisasi kayak pola config
+  lain di project ini). Belum dilakukan sesi ini -- cuma divalidasi lewat
+  CLI, belum dijadikan default resmi.
 - `pipeline/inference.py` / `05_run_inference.py` -- masih BELUM dibahas
-  sama sekali (tetap seperti §10 poin 5 lama), TAPI kalau damping
-  divalidasi berhasil, desain inference production nanti WAJIB pakai
-  logika damping yang sama (jangan re-derive dari nol, reuse
-  `_apply_damping()` dari `recursive_eval.py` atau extract ke modul
-  shared kalau perlu dipakai di kedua tempat).
+  sama sekali (tetap seperti §10 poin 5 lama). Damping SUDAH divalidasi
+  berhasil (poin 6) -- desain inference production nanti WAJIB pakai
+  `damping_factor=0.9` dan logika damping yang sama (jangan re-derive dari
+  nol, reuse `_apply_damping()` dari `recursive_eval.py` atau extract ke
+  modul shared kalau perlu dipakai di kedua tempat). TAPI tunggu hasil
+  noise injection dulu (poin di atas) sebelum finalisasi, karena optimal
+  damping_factor bisa geser setelah retrain.
 
 ---

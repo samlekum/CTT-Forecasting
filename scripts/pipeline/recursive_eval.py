@@ -7,7 +7,7 @@ import pandas as pd
 
 from pipeline.config import Config
 from pipeline.dataset_builder import load_raw_cache
-from pipeline.expanding_features import FEATURE_COLUMNS
+from pipeline.expanding_features import FEATURE_COLUMNS, compute_window_features_matrix
 from pipeline.model_training import load_expanding_dataset, stratified_monthly_split
 from ui.terminal_display import make_progress_bar, say_info, say_ok
 
@@ -66,62 +66,6 @@ def _map_anchors_to_indices(anchors_df, timeline, pixel_meta):
     out["start_idx"] = start_idx[valid].astype(np.int64)
     out["pixel_col"] = pixel_col[valid].astype(np.int64)
     return out.reset_index(drop=True)
-
-
-def _compute_window_features_local(series_matrix):
-    """Hitung 9 fitur closed-form (FEATURE_COLUMNS) dari window LOKAL yang
-    sama panjangnya untuk semua anchor sekaligus (vectorized), tanpa cumsum
-    trick -- window di sini selalu pendek (<=23 titik) dan full-recompute
-    tiap step tetap murah dibanding kompleksitas cumsum untuk kasus ini
-    (beda dari dataset_builder.py yang butuh cumsum karena window bisa
-    berapa pun & anchor jumlahnya jutaan sekaligus per pixel).
-
-    Parameters
-    ----------
-    series_matrix : np.ndarray, shape (n_anchor, L)
-        L = panjang window saat ini (sama untuk semua anchor pada step yg
-        sama, karena expanding window tumbuh sinkron per step).
-
-    Return
-    ------
-    pd.DataFrame, kolom = FEATURE_COLUMNS, baris sejajar dengan series_matrix.
-    """
-    n_anchor, L = series_matrix.shape
-
-    mean_window = series_matrix.mean(axis=1)
-    var_window = np.clip(series_matrix.var(axis=1), 0.0, None)  # var(ddof=0), guard floating point sama seperti expanding_features.py
-    std_window = np.sqrt(var_window)
-    min_window = series_matrix.min(axis=1)
-    max_window = series_matrix.max(axis=1)
-    first_value = series_matrix[:, 0]
-    last_value = series_matrix[:, -1]
-    delta_first_last = last_value - first_value
-
-    # Slope pakai t lokal 0..L-1 -- identik dengan t global karena slope
-    # invarian terhadap pergeseran konstan (lihat catatan di header modul).
-    t = np.arange(L, dtype=np.float64)
-    t_mean = t.mean()
-    t_centered = t - t_mean
-    denom = np.sum(t_centered**2)
-    if denom == 0:  # L == 1, harusnya nggak pernah kejadian (MIN_WINDOW_SIZE >= 3 dijamin config), guard saja
-        slope = np.zeros(n_anchor)
-    else:
-        numer = ((series_matrix - mean_window[:, None]) * t_centered).sum(axis=1)
-        slope = numer / denom
-
-    n_points = np.full(n_anchor, float(L))
-
-    return pd.DataFrame({
-        "mean_window": mean_window,
-        "std_window": std_window,
-        "min_window": min_window,
-        "max_window": max_window,
-        "first_value": first_value,
-        "last_value": last_value,
-        "delta_first_last": delta_first_last,
-        "slope": slope,
-        "n_points": n_points,
-    })[FEATURE_COLUMNS]
 
 
 def _apply_damping(raw_pred, last_value, step, damping_factor):
@@ -196,7 +140,7 @@ def run_recursive_evaluation(model_name, model, anchors_idx, data_matrix, timeli
     step_progress = make_progress_bar(range(1, HORIZON_STEPS + 1), desc=f"Recursive [{model_name}]", unit="step")
     for step in step_progress:
         L = series.shape[1]
-        features_df = _compute_window_features_local(series)
+        features_df = compute_window_features_matrix(series)
         y_pred_raw = model.predict(features_df)
         last_value = series[:, -1]
         y_pred = _apply_damping(y_pred_raw, last_value, step, damping_factor)

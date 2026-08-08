@@ -17,10 +17,17 @@ import numpy as np
 import pandas as pd
 
 from pipeline.config import Config
-from pipeline.expanding_features import FEATURE_COLUMNS
+from pipeline.expanding_features import FEATURE_COLUMNS, compute_window_features_matrix
 from ui.terminal_display import make_progress_bar, say_info, say_ok, say_error
 
 TARGET_COLUMN = f"target_{Config.TARGET_CHANNEL}"
+MIN_WINDOW_SIZE = Config.MIN_WINDOW_SIZE
+
+# Fitur yang dipakai buat rekonstruksi window mentah dari cache raw waktu
+# noise injection (lihat inject_recursive_style_noise()). anchor_t0 +
+# pixel_id -> posisi start window di cache; n_points -> panjang window
+# (udah salah satu dari FEATURE_COLUMNS, dibuat pas dataset_builder.py).
+_NOISE_JOIN_COLUMNS = ["pixel_id", "anchor_t0", "n_points"]
 
 
 def load_expanding_dataset(path):
@@ -94,6 +101,119 @@ def get_feature_target(df, feature_columns=None):
     X = df[feature_columns or FEATURE_COLUMNS].copy()
     y = df[TARGET_COLUMN].copy()
     return X, y
+
+
+def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=42):
+    """Redesain noise injection buat skema fitur closed-form project ini
+    (BUKAN port verbatim dari `inject_lag_noise()` repo lama -- lihat
+    CLAUDE.md §17 poin "Belum dikerjakan" versi sebelumnya, skema fitur di
+    situ raw lag columns (tbb_13_t/tm1/tm2), di sini 9 fitur AGREGAT window
+    (mean/std/min/max/first/last/delta/slope/n_points) -- noise independen
+    per kolom bisa bikin kombinasi fisik nggak konsisten, mis. min_window >
+    max_window, atau std_window nggak sinkron sama mean/slope-nya).
+
+    KENAPA & DESAIN: root cause exposure bias (CLAUDE.md §17 poin 4) adalah
+    saat recursive rollout, window makin lama makin isi PREDIKSI model
+    sendiri (bukan observasi real) mulai step ke-2 (titik ke MIN_WINDOW_SIZE
+    dst di window) -- fitur dihitung dari window "kotor" itu, model belum
+    pernah lihat kombinasi fitur seperti itu pas training (window training
+    selalu 100% observasi real). Fix: SIMULASIKAN kondisi itu pas training --
+    untuk tiap baris training (anchor_t0, pixel_id, n_points sudah nentuin
+    window persis via cache raw, sama seperti recursive_eval.py), tambahkan
+    noise Gaussian HANYA ke titik-titik window yang posisinya > MIN_WINDOW_SIZE
+    dari awal (posisi yang di kondisi recursive sungguhan bakal diisi
+    prediksi, bukan observasi -- titik 0..MIN_WINDOW_SIZE-1 SELALU real, sama
+    kayak IS1 di recursive_eval.py), lalu HITUNG ULANG semua 9 fitur dari
+    window yang sudah dinoise pakai compute_window_features_matrix() (fungsi
+    closed-form yang SAMA dipakai recursive_eval.py) -- ini otomatis jaga
+    konsistensi fisik antar fitur (min<=mean<=max, std/slope ikut berubah
+    proporsional), BUKAN noise 5 kolom independen yang bisa saling
+    kontradiksi.
+
+    Baris dengan n_points == MIN_WINDOW_SIZE (step 1, window 100% real) TIDAK
+    disentuh sama sekali (no-op, dilewati dari grouping) -- konsisten dengan
+    fakta recursive rollout beneran juga selalu punya window 100% real di
+    step 1.
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        HARUS masih punya kolom pixel_id/anchor_t0/n_points (jangan panggil
+        get_feature_target() dulu sebelum ini -- kolom itu dibuang di sana).
+    cache_path : str
+        Path cache raw .npz (Config.EXPANDING_RAW_CACHE_FILE), SAMA yang
+        dipakai 04_recursive_evaluate.py -- dibutuhkan buat rekonstruksi
+        window mentah (dataset CSV cuma nyimpen fitur agregat, bukan raw).
+    noise_std : float
+        Std deviasi noise Gaussian (satuan Kelvin, sama seperti unit TBB) yang
+        ditambahkan per TITIK di bagian window yang "dianggap prediksi".
+        noise_std <= 0 -> no-op, return train_df apa adanya (backward-compat).
+        Idealnya mulai dari ~seukuran MAE step-1 aktual (lihat
+        recursive_mae_summary.csv, damping_factor=0.9 -- MAE step 1 ~2.5-2.6K
+        di ketiga model), BUKAN diagreb, WAJIB divalidasi lewat sweep sama
+        seperti damping_factor (re-run sweep_damping.py setelah retrain).
+
+    Return
+    ------
+    pd.DataFrame, sama seperti train_df tapi kolom FEATURE_COLUMNS sudah
+    diganti versi noised (kolom lain, termasuk target, TIDAK berubah).
+    """
+    if noise_std <= 0:
+        return train_df
+
+    from pipeline.dataset_builder import load_raw_cache
+
+    missing_cols = [c for c in _NOISE_JOIN_COLUMNS if c not in train_df.columns]
+    if missing_cols:
+        raise KeyError(
+            f"train_df kehilangan kolom {missing_cols} yang dibutuhkan buat noise "
+            "injection -- panggil inject_recursive_style_noise() SEBELUM "
+            "get_feature_target() (yang buang kolom pixel_id/anchor_t0/n_points)."
+        )
+
+    say_info(f"Noise injection: std={noise_std}K pada window > step 1 (rekonstruksi dari cache)")
+    data_matrix, timeline, pixel_meta = load_raw_cache(cache_path)
+    timeline_index = {ts: i for i, ts in enumerate(timeline)}
+    pixel_index = {pid: i for i, pid in enumerate(pixel_meta["pixel_id"].values)}
+
+    df = train_df.copy()
+    start_idx = df["anchor_t0"].map(timeline_index)
+    pixel_col = df["pixel_id"].map(pixel_index)
+    valid = start_idx.notna() & pixel_col.notna()
+    n_invalid = (~valid).sum()
+    if n_invalid > 0:
+        say_info(
+            f"PERINGATAN noise injection: {n_invalid} baris nggak ketemu di cache "
+            "(kemungkinan cache beda run dengan dataset CSV) -- fitur ASLI (tanpa "
+            "noise) dipakai buat baris ini, bukan di-skip dari training."
+        )
+
+    rng = np.random.default_rng(random_state)
+    noised_parts = []
+
+    for L, group in df[valid].groupby(df.loc[valid, "n_points"].round().astype(np.int64)):
+        L = int(L)
+        n_noised_cols = L - MIN_WINDOW_SIZE
+        if n_noised_cols <= 0:
+            continue  # step 1: window 100% real, no-op (lihat docstring)
+
+        starts = start_idx[group.index].astype(np.int64).values
+        pcols = pixel_col[group.index].astype(np.int64).values
+        window_idx = starts[:, None] + np.arange(L)[None, :]
+        series = data_matrix[window_idx, pcols[:, None]].astype(np.float64)
+
+        noise = rng.normal(0.0, noise_std, size=(series.shape[0], n_noised_cols))
+        series[:, MIN_WINDOW_SIZE:] = series[:, MIN_WINDOW_SIZE:] + noise
+
+        noised_feats = compute_window_features_matrix(series)
+        noised_feats.index = group.index
+        noised_parts.append(noised_feats)
+
+    if noised_parts:
+        noised_all = pd.concat(noised_parts)
+        df.loc[noised_all.index, FEATURE_COLUMNS] = noised_all[FEATURE_COLUMNS]
+
+    return df
 
 
 def train_xgboost(X_train, y_train):
@@ -186,10 +306,11 @@ def evaluate(model, X_test, y_test):
     return {"mae": mae, "rmse": rmse, "r2": r2}
 
 
-def train_all_models(df, models_dir=None, test_frac=None):
-    """Fungsi utama: split (stratified monthly) -> train semua model di
-    Config.MODEL_NAMES -> evaluasi dasar -> simpan model (.joblib) +
-    ringkasan metrik (training_summary.csv) ke `models_dir`.
+def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_path=None):
+    """Fungsi utama: split (stratified monthly) -> [opsional noise injection
+    ke train_df] -> train semua model di Config.MODEL_NAMES -> evaluasi dasar
+    -> simpan model (.joblib) + ringkasan metrik (training_summary.csv) ke
+    `models_dir`.
 
     Parameters
     ----------
@@ -197,11 +318,19 @@ def train_all_models(df, models_dir=None, test_frac=None):
         Dataset hasil dataset_builder.build_dataset() / load_expanding_dataset().
     models_dir : str, optional. Default None -> Config.EXPANDING_MODELS_DIR.
     test_frac : float, optional. Default None -> Config.TEST_FRAC.
+    noise_std : float, default 0.0 (tidak ada noise -- perilaku lama,
+        backward-compatible). Kalau > 0, X_train (BUKAN X_test -- test set
+        harus tetap bersih/real biar evaluasi apple-to-apple) di-redesain
+        lewat inject_recursive_style_noise() -- lihat docstring fungsi itu
+        untuk alasan & desain lengkap.
+    cache_path : str, optional. WAJIB diisi (atau Config.EXPANDING_RAW_CACHE_FILE
+        dipakai) kalau noise_std > 0 -- dibutuhkan buat rekonstruksi window
+        mentah dari cache.
 
     Return
     ------
     summary_df : pd.DataFrame, satu baris per model, kolom: model, n_train,
-        n_test, waktu_training_detik, mae, rmse, r2.
+        n_test, waktu_training_detik, mae, rmse, r2, noise_std.
     """
     import os
     import joblib
@@ -211,10 +340,16 @@ def train_all_models(df, models_dir=None, test_frac=None):
     os.makedirs(models_dir, exist_ok=True)
 
     train_df, test_df, cutoffs = stratified_monthly_split(df, test_frac=test_frac)
-    X_train, y_train = get_feature_target(train_df)
-    X_test, y_test = get_feature_target(test_df)
     say_info(f"Split selesai -- train: {len(train_df)} baris, test: {len(test_df)} baris "
              f"({len(cutoffs)} bulan).")
+
+    if noise_std > 0:
+        train_df = inject_recursive_style_noise(
+            train_df, cache_path or Config.EXPANDING_RAW_CACHE_FILE, noise_std,
+        )
+
+    X_train, y_train = get_feature_target(train_df)
+    X_test, y_test = get_feature_target(test_df)
 
     summary_rows = []
     # Progress bar per-model -- training XGBoost/LightGBM/CatBoost bisa makan
@@ -244,12 +379,14 @@ def train_all_models(df, models_dir=None, test_frac=None):
                 "mae": metrics["mae"],
                 "rmse": metrics["rmse"],
                 "r2": metrics["r2"],
+                "noise_std": noise_std,
             })
         except ImportError as e:
             say_error(f"{model_name} dilewati -- library belum terinstall: {e}")
             summary_rows.append({
                 "model": model_name, "n_train": len(train_df), "n_test": len(test_df),
                 "waktu_training_detik": None, "mae": None, "rmse": None, "r2": None,
+                "noise_std": noise_std,
                 "error": f"Library belum terinstall: {e}",
             })
 

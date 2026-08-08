@@ -53,13 +53,13 @@ from pipeline.config import Config
 from pipeline.expanding_features import FEATURE_COLUMNS
 from pipeline.dataset_builder import load_raw_cache
 from pipeline.model_training import load_expanding_dataset
+from pipeline.expanding_features import compute_window_features_matrix
 from pipeline.recursive_eval import (
     MIN_WINDOW_SIZE,
     HORIZON_STEPS,
     TARGET_COLUMN,
     select_test_anchors,
     _map_anchors_to_indices,
-    _compute_window_features_local,
 )
 from ui.terminal_display import banner, gap, hr, say_info, say_ok, say_error, make_progress_bar
 
@@ -108,7 +108,7 @@ def _rollout_with_features(model_name, model, anchors_idx, data_matrix, timeline
     step_progress = make_progress_bar(range(1, HORIZON_STEPS + 1), desc=f"Rollout+fitur [{model_name}]", unit="step")
     for step in step_progress:
         L = series.shape[1]
-        features_df = _compute_window_features_local(series)
+        features_df = compute_window_features_matrix(series)
         y_pred = model.predict(features_df)
 
         target_idx = starts + L

@@ -40,6 +40,9 @@ catboost_info/
 # Models
 models/
 
+# Log
+*log
+
 # Processed Dataset
 dataset/
 evaluation/

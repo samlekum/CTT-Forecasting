@@ -261,12 +261,8 @@ sebelum dikoding.
    29 menit** (~1.3 detik/file) -- total waktu proses 02 jadi 45.222 detik
    (~12.5 jam), justru LEBIH LAMA dari `03a_build_features.py` di repo
    lama (10 jam+) yang jadi alasan awal project ini dibuat (§1, §11).
-   Bottleneck-nya SEKARANG di I/O baca file, BUKAN di compute. Belum
-   dibenahi sesi ini (scope sesi ini fokus ke `recursive_eval.py`) --
-   kandidat perbaikan sesi berikutnya: paralelkan `load_pixel_grid()`
-   (tiap file independen, cocok `ProcessPoolExecutor`/`ThreadPoolExecutor`),
-   dan/atau checkpointing tiap N file (run 12.5 jam tanpa save
-   intermediate itu berisiko kalau crash di tengah).
+   Bottleneck-nya SEKARANG di I/O baca file, BUKAN di compute.
+   **SUDAH DIBENAHI** di sesi paralelisasi I/O -- lihat §16.
 5. ✅ **SELESAI** — `pipeline/recursive_eval.py` (`scripts/04_recursive_evaluate.py`)
    — evaluasi recursive per t0, hitung MAE per step 1-18. Lihat §15 untuk
    detail desain & keputusan.
@@ -534,9 +530,142 @@ asli sebelum dianggap final. Lihat instruksi re-run di respons chat sesi ini.
 
 ### Belum dikerjakan / di luar scope sesi ini
 
-- Perbaikan bottleneck I/O `load_pixel_grid()` (lihat catatan performa di
-  poin 4) -- kandidat: paralelisasi baca file, checkpointing.
+- ~~Perbaikan bottleneck I/O `load_pixel_grid()`~~ -- **SUDAH** (lihat §16).
+  Checkpointing tiap N file BELUM (masih di luar scope, lihat §16).
 - `pipeline/inference.py` / `05_run_inference.py` -- BELUM dibahas sama
   sekali, jangan diasumsikan desainnya (§10).
+
+---
+
+## 16. Keputusan Desain Tambahan (sesi paralelisasi I/O `load_pixel_grid()`)
+
+Nyerang bottleneck yang ditemukan di §10 poin 4: loop sekuensial baca
+34.420 file `.nc` makan ~12.5 jam. Root cause bukan compute (closed-form
+feature engineering cuma ~10 detik), tapi overhead buka/parse tiap file
+NetCDF satu-satu.
+
+### Desain: ProcessPoolExecutor, BUKAN ThreadPoolExecutor
+
+Library HDF5/netCDF4 C di balik `xr.open_dataset()` pada build default
+**TIDAK thread-safe** (thread-safety HDF5 cuma aktif kalau library-nya
+dikompilasi eksplisit dengan `--enable-threadsafe`, jarang jadi default
+paket binary). Baca paralel lewat banyak thread Python di satu proses
+berisiko crash/korupsi diam-diam. Proses terpisah aman total karena tiap
+worker punya instance HDF5/netCDF4 sendiri, tidak share state C library
+apapun.
+
+### Alur 2 fase di `load_pixel_grid()`
+
+1. **Sekuensial (cepat)**: scan `entries` satu-satu sampai ketemu file
+   valid PERTAMA (punya `target_channel`, berhasil dibuka) -- dipakai
+   nentuin `canonical_shape` & grid lat/lon, yang WAJIB ada sebelum
+   `data_matrix` bisa dialokasikan dan sebelum file lain bisa divalidasi
+   shape-nya. File yang di-skip di fase ini (missing channel / gagal
+   baca, biasanya di awal urutan kronologis) dicatat sekali, TIDAK dibaca
+   ulang di fase 2.
+2. **Paralel**: sisa file (setelah file valid pertama) dibaca lintas
+   proses via `ProcessPoolExecutor.map()` dengan worker top-level
+   `_read_netcdf_worker()` (HARUS top-level module, bukan closure, biar
+   bisa di-pickle ke proses lain). Hasil di-assign balik ke `data_matrix`
+   di proses utama pakai `t_idx` -- aman tanpa lock karena tiap file
+   nulis ke baris array berbeda (`t_idx` unik per timestamp, nggak ada
+   overlap write).
+
+`chunksize` untuk `executor.map()` dihitung `len(remaining) // (n_workers
+* 4)` -- task-nya kecil (buka 1 file) tapi jumlahnya puluhan ribu, jadi
+submit satu future per file mahal karena overhead IPC (pickle/unpickle)
+per-task; kelompokkan beberapa file per chunk mengamortisasi overhead itu.
+
+### Config & CLI baru
+
+- `Config.NETCDF_READ_WORKERS` (config.py): default `os.cpu_count() - 1`
+  (semua core kecuali 1, biar OS/proses lain tetap responsif).
+- `--workers N` di `02_build_expanding_features.py`, override default.
+  `--workers 1` = fallback sekuensial murni (skip overhead spawn
+  `ProcessPoolExecutor` sama sekali) -- berguna untuk debug atau kalau
+  disk I/O (bukan CPU) yang jadi bottleneck di mesin tertentu, di mana
+  paralel proses nggak nambah kecepatan (malah nambah overhead).
+- `build_dataset()` dapet parameter baru `n_workers=None`, diteruskan ke
+  `load_pixel_grid()`.
+
+### Divalidasi
+
+Correctness dites di sandbox terpisah (xarray/netCDF4 diinstall manual di
+situ, bukan bagian environment dev utama) pakai file `.nc` sintetis, BUKAN
+di data asli 34rb file (belum sempat, lihat "belum dikerjakan" di bawah):
+
+- **Kasus normal** (300 file bersih, grid 5x7): `data_matrix` &
+  `pixel_meta` hasil `n_workers=1` vs `n_workers=3` identik byte-per-byte
+  (`np.array_equal(..., equal_nan=True)` True, `pixel_meta.equals()` True).
+- **Kasus edge** (150 file dengan 3 file tanpa `target_channel` di AWAL
+  urutan -- sebelum file valid pertama --, 2 file korup/bukan NetCDF valid
+  di tengah run, 1 file shape-mismatch grid): NaN row pattern
+  (`[0,1,2,5,40,80]`), counter `n_missing_channel`/`n_mismatched`/
+  `n_errors` semua identik antara jalur sekuensial dan paralel.
+
+Sandbox validasi cuma 1 CPU -- speedup RIIL belum diukur di sandbox itu,
+cuma correctness yang kebukti. Speedup riil di mesin produksi Dhika sudah
+diukur setelahnya -- lihat "Hasil smoke-test di mesin produksi" di bawah.
+
+### Hasil smoke-test di mesin produksi (Windows, 4 physical core / 8 logical thread)
+
+Diukur Dhika pakai `--max-files 500` (bukan estimasi/dugaan), data asli
+Himawari (bukan sintetis):
+
+| Workers | Waktu total | Waktu baca (fase paralel) | Speedup vs 2 workers |
+|---|---|---|---|
+| 2 | 477.2s | ~470s | 1.0x (baseline) |
+| 4 | 297.9s | ~291s | 1.60x |
+| 8 | 237.7s | ~229s | 2.01x |
+
+**Scaling TIDAK linear** -- diminishing returns jelas kelihatan mulai
+4→8 workers (cuma +25% speedup padahal worker dilipatgandakan), padahal
+2→4 workers efisiensinya jauh lebih baik (+60% speedup buat pelipatan
+yang sama). Root cause dikonfirmasi via
+`Get-CimInstance -ClassName Win32_Processor`: mesin Dhika cuma punya
+**4 physical core**, `NumberOfLogicalProcessors=8` itu hasil
+hyperthreading, BUKAN 8 core fisik independen. Kerjaan parsing
+HDF5/netCDF itu CPU-bound berat (bukan I/O-bound murni di kasus ini) --
+dua logical thread di physical core yang sama rebutan unit eksekusi
+fisik yang sama, jadi worker ke-5 sampai ke-8 cuma dapet speedup parsial
+dari hyperthreading, bukan paralelisme penuh kayak worker 1-4.
+
+**Kesimpulan praktis**: `--workers 8` tetap yang tercepat dari semua
+percobaan (bukan berarti workers lebih banyak selalu lebih baik di mesin
+manapun, tapi di kasus ini masih net-positive dibanding 4), jadi tetap
+dipakai buat full run. Ekstrapolasi kasar ke 34.420 file pakai rate
+workers=8 (0.476 detik/file dari fase paralel): ~4.5 jam, dibanding
+baseline sekuensial lama 12.5 jam (~2.7x lebih cepat) -- signifikan,
+meski bukan 8x seperti yang diharapkan kalau scaling linear sempurna.
+Angka ini ekstrapolasi dari 500 file pertama (kronologis) di awal
+rentang data, belum tentu representatif ke seluruh 8 bulan data kalau
+ada variasi kondisi file/disk antar periode.
+
+**Implikasi buat mesin lain**: default `Config.NETCDF_READ_WORKERS`
+(`cpu_count - 1`) pakai `os.cpu_count()` yang di Python ngembaliin
+LOGICAL processor count, bukan physical core. Di mesin dengan
+hyperthreading/SMT aktif, ini artinya default-nya bisa "overestimate"
+jumlah paralelisme CPU-bound yang efektif -- bukan salah/bug, cuma perlu
+diketahui kalau nanti mau tuning lebih jauh di mesin lain. Belum ada
+logic buat auto-deteksi physical-core-only di config.py (di luar scope
+sesi ini kalau mau ditambah, bisa pakai `psutil.cpu_count(logical=False)`
+kalau dependency itu diterima).
+
+### Belum dikerjakan / di luar scope sesi ini
+
+- **Full run 34rb file BELUM dijalankan** -- baru smoke-test
+  `--max-files 500`. Dhika sudah menjadwalkan full run
+  (`--workers 8`, tanpa `--max-files`) setelah smoke-test ini, lanjut
+  `03_train_model.py` dan `04_recursive_evaluate.py`. Hasil aktual
+  (durasi total, apakah ada crash/error di file-file yang belum pernah
+  ke-exercise di smoke-test 500 file pertama) BELUM diketahui saat
+  dokumen ini ditulis.
+- **Checkpointing tiap N file** (disebut sebagai kandidat di §10 poin 4)
+  MASIH belum diimplementasi -- run full masih nggak save intermediate
+  state. Risikonya sekarang lebih kecil (perkiraan ~4.5 jam, bukan 12.5
+  jam), tapi tetap ada kalau crash di tengah jalan.
+- **Auto-deteksi physical core** (lihat catatan `os.cpu_count()` di
+  atas) belum diimplementasi -- default masih pakai logical processor
+  count apa adanya.
 
 ---

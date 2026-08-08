@@ -107,6 +107,7 @@ def main():
         f"({'auto-detect' if result['model_auto_detected'] else 'manual via --model'})"
     )
     say_info(f"Pixel di-forecast  : {result['n_used']}/{result['n_total']}")
+    say_info(f"Folder output      : {result['run_dir']}")
     say_info(f"Output CSV         : {result['csv_path']}")
     say_info(f"Output GeoJSON     : {result['geojson_path']}")
 

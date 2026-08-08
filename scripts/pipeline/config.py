@@ -203,8 +203,9 @@ class Config:
 
     # Direktori output forecast (Tahap 6). SUDAH ada di .gitignore
     # (forecast_output/) -- riwayat run TIDAK di-commit, tapi TETAP
-    # disimpan lokal per-run (nama file timestamped + nama model, BUKAN
-    # overwrite "latest") supaya bisa diaudit/dibandingkan lintas run.
+    # disimpan lokal sbg 1 FOLDER per run (nama folder timestamped + nama
+    # model, pola sama dgn visualizations/ di Tahap 7, BUKAN overwrite
+    # "latest") supaya bisa diaudit/dibandingkan lintas run.
     INFERENCE_DIR = os.path.join(PROJECT_ROOT, "forecast_output")
 
     # ------------------------------------------------------------------

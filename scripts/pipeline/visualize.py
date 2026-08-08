@@ -36,13 +36,16 @@ from ui.terminal_display import say_info, say_ok, say_error, banner, make_progre
 
 FREQ_MINUTES = Config.FREQ_MINUTES
 
-# Regex nama file BARU Stage 05 SAJA -- file pola lama (sisa testing
-# sebelum fitur t0-di-nama-file ditambahkan, tanpa token "t0"/"run") tidak
-# match ini, jadi otomatis ke-skip di discover_forecast_files() (bukan
-# krn digit kebetulan nggak cocok, tapi krn token literal "t0"/"run"
-# memang nggak ada di nama lama).
-FORECAST_FILENAME_RE = re.compile(
-    r"^forecast_(?P<model>[A-Za-z0-9]+)_t0(?P<t0>\d{8}_\d{4})_run(?P<run>\d{8}_\d{4})\.csv$"
+# Regex nama FOLDER (bukan nama file lagi -- Stage 05 sekarang simpan
+# forecast.csv/forecast.geojson dalam 1 folder per run, pola sama persis
+# dgn folder output Stage 06/visualizations/, lihat CLAUDE.md §21). Folder
+# hasil Stage 05 versi LAMA (file flat forecast_{model}_t0..._run....csv
+# langsung di forecast_output/, dari sebelum restrukturisasi ini) otomatis
+# TIDAK match apa pun di sini (bukan folder), jadi otomatis ke-skip di
+# discover_forecast_files() -- sama filosofi "pola lama diabaikan diam2"
+# yang sudah ada sejak fitur t0-di-nama ditambahkan.
+FORECAST_FOLDER_RE = re.compile(
+    r"^(?P<model>[A-Za-z0-9]+)_t0(?P<t0>\d{8}_\d{4})_run(?P<run>\d{8}_\d{4})$"
 )
 
 # --- Palet warna (skill dataviz, lihat references/palette.md) --------------
@@ -80,15 +83,20 @@ TEXT_SECONDARY = "#52514e"
 # ============================================================================
 
 def discover_forecast_files(forecast_dir=None):
-    """Scan forecast_dir, kembalikan HANYA file berpola BARU Stage 05
-    (lihat FORECAST_FILENAME_RE). File pola lama diabaikan diam-diam (satu
-    baris ringkasan jumlahnya, bukan error/warning per-file -- itu cuma
-    sisa testing, bukan forecast asli yang perlu ditampilkan di menu).
+    """Scan forecast_dir, kembalikan HANYA folder berpola BARU Stage 05
+    (`{model}_t0{...}_run{...}/`, lihat FORECAST_FOLDER_RE) yang beneran
+    punya `forecast.csv` di dalamnya. File FLAT lama (hasil Stage 05
+    SEBELUM restrukturisasi jadi folder-per-run -- `forecast_{model}_t0
+    {...}_run{...}.csv` langsung di forecast_dir) diabaikan diam-diam
+    (satu baris ringkasan jumlahnya, bukan error/warning per-file --
+    riwayat lama TETAP ADA di disk, cuma tidak lagi muncul di menu).
 
     Return
     ------
-    pd.DataFrame kolom: filename, path, model_name, t0_str, run_str,
-    t0_ts, run_ts -- terurut run_ts DESCENDING (run terbaru duluan).
+    pd.DataFrame kolom: filename (nama folder, dipakai buat label
+    tampilan), path (path LENGKAP ke forecast.csv di dalam folder itu),
+    model_name, t0_str, run_str, t0_ts, run_ts -- terurut run_ts
+    DESCENDING (run terbaru duluan).
     """
     if forecast_dir is None:
         forecast_dir = Config.INFERENCE_DIR
@@ -100,15 +108,21 @@ def discover_forecast_files(forecast_dir=None):
 
     rows = []
     n_old_pattern = 0
-    for fname in sorted(os.listdir(forecast_dir)):
-        m = FORECAST_FILENAME_RE.match(fname)
-        if not m:
-            if fname.startswith("forecast_") and fname.endswith(".csv"):
+    for entry in sorted(os.listdir(forecast_dir)):
+        entry_path = os.path.join(forecast_dir, entry)
+        if not os.path.isdir(entry_path):
+            if entry.startswith("forecast_") and entry.endswith(".csv"):
                 n_old_pattern += 1
             continue
+        m = FORECAST_FOLDER_RE.match(entry)
+        if not m:
+            continue
+        csv_path = os.path.join(entry_path, "forecast.csv")
+        if not os.path.exists(csv_path):
+            continue  # folder cocok pola tapi forecast.csv tidak ada -- skip diam2, bukan crash
         rows.append({
-            "filename": fname,
-            "path": os.path.join(forecast_dir, fname),
+            "filename": entry,
+            "path": csv_path,
             "model_name": m.group("model"),
             "t0_str": m.group("t0"),
             "run_str": m.group("run"),
@@ -118,8 +132,9 @@ def discover_forecast_files(forecast_dir=None):
 
     if n_old_pattern:
         say_info(
-            f"{n_old_pattern} file forecast_*.csv pola LAMA (tanpa info t0) diabaikan -- "
-            "sisa testing sebelum fitur t0-di-nama-file ditambahkan, bukan forecast asli."
+            f"{n_old_pattern} file forecast_*.csv pola LAMA (flat, dari sebelum Stage 05 "
+            "direstruktur jadi folder-per-run) diabaikan -- tetap ada di disk, cuma tidak "
+            "muncul di menu ini lagi."
         )
 
     df = pd.DataFrame(rows)
@@ -875,12 +890,16 @@ def visualize_forecast(csv_path=None, forecast_dir=None, output_dir=None, frame_
         t0_str = selected["t0_str"]
         run_str = selected["run_str"]
     else:
-        fname = os.path.basename(csv_path)
-        m = FORECAST_FILENAME_RE.match(fname)
+        # Model/t0/run sekarang diparse dari NAMA FOLDER INDUK
+        # (forecast.csv sendiri namanya generic, identitas ada di nama
+        # folder -- lihat FORECAST_FOLDER_RE / CLAUDE.md §21).
+        folder_name = os.path.basename(os.path.dirname(csv_path))
+        m = FORECAST_FOLDER_RE.match(folder_name)
         if not m:
             raise ValueError(
-                f"Nama file '{fname}' tidak cocok pola forecast_{{model}}_t0{{...}}_run{{...}}.csv "
-                "-- tidak bisa diparse otomatis. Pastikan --csv menunjuk ke output 05_run_inference.py."
+                f"Nama folder induk '{folder_name}' tidak cocok pola {{model}}_t0{{...}}_run{{...}} "
+                "-- tidak bisa diparse otomatis. Pastikan --csv menunjuk ke forecast.csv di dalam "
+                "folder output 05_run_inference.py (forecast_output/{model}_t0..._run.../forecast.csv)."
             )
         model_name = m.group("model")
         t0_str = m.group("t0")

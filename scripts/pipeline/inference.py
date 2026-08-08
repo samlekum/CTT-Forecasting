@@ -438,44 +438,47 @@ def build_geojson_feature_collection(detail_df, model_name, damping_factor, gene
 
 
 def save_forecast_outputs(detail_df, model_name, damping_factor, output_dir=None, run_timestamp=None, t0_label=None):
-    """Simpan CSV + GeoJSON, nama file include model_name + t0 (titik
+    """Simpan CSV + GeoJSON dalam SATU FOLDER per run (pola SAMA dgn
+    Stage 06 -- lihat visualize.build_output_paths()):
+    `{output_dir}/{model_name}_t0{t0str}_run{run_timestamp}/forecast.csv`
+    + `.../forecast.geojson`. Nama folder include model_name + t0 (titik
     referensi waktu forecast-nya -- window_end_time yang benar2 kepakai,
     BUKAN cuma kapan script-nya dijalankan) + run_timestamp (kapan
-    script-nya dijalankan). Retensi: riwayat semua run disimpan, BUKAN
-    overwrite "latest".
+    script-nya dijalankan). Retensi: riwayat semua run disimpan sbg folder
+    terpisah, BUKAN overwrite "latest".
 
     `t0_label` idealnya SELALU diisi caller (run_inference() isi ini dari
     anchors_df, representatif walau --t0 tidak dioverride -- default-nya
     ambil window_end_time terbaru yang benar2 dipakai). Kalau None
-    (dipanggil manual di luar run_inference()), nama file fallback cuma
+    (dipanggil manual di luar run_inference()), nama folder fallback cuma
     pakai run_timestamp (t0 tidak diketahui, ditandai "t0unknown").
 
     Return
     ------
-    (csv_path, geojson_path)
+    (run_dir, csv_path, geojson_path)
     """
     if output_dir is None:
         output_dir = Config.INFERENCE_DIR
     if run_timestamp is None:
         # Sampai menit saja (bukan detik) -- cukup buat retensi timestamped
-        # per run batch terjadwal, nama file lebih ringkas. Trade-off: kalau
-        # ada 2 run untuk model+t0 yang sama dalam menit yang sama, file
-        # kedua akan menimpa yang pertama (jarang terjadi buat batch
+        # per run batch terjadwal, nama folder lebih ringkas. Trade-off: kalau
+        # ada 2 run untuk model+t0 yang sama dalam menit yang sama, folder
+        # kedua akan menimpa isi yang pertama (jarang terjadi buat batch
         # terjadwal).
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
     t0_str = pd.Timestamp(t0_label).strftime("%Y%m%d_%H%M") if t0_label is not None else "unknown"
 
-    os.makedirs(output_dir, exist_ok=True)
+    run_dir = os.path.join(output_dir, f"{model_name}_t0{t0_str}_run{run_timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
 
     df = detail_df.copy()
     df["model_name"] = model_name
     df["damping_factor"] = damping_factor
     df = df[CSV_COLUMNS]
 
-    base_name = f"forecast_{model_name}_t0{t0_str}_run{run_timestamp}"
-    csv_path = os.path.join(output_dir, f"{base_name}.csv")
-    geojson_path = os.path.join(output_dir, f"{base_name}.geojson")
+    csv_path = os.path.join(run_dir, "forecast.csv")
+    geojson_path = os.path.join(run_dir, "forecast.geojson")
 
     df.to_csv(csv_path, index=False)
 
@@ -484,9 +487,10 @@ def save_forecast_outputs(detail_df, model_name, damping_factor, output_dir=None
     with open(geojson_path, "w", encoding="utf-8") as f:
         json.dump(geo, f, indent=2)
 
+    say_ok(f"Folder forecast disimpan ke: {run_dir}")
     say_ok(f"Forecast CSV disimpan ke: {csv_path}")
     say_ok(f"Forecast GeoJSON disimpan ke: {geojson_path}")
-    return csv_path, geojson_path
+    return run_dir, csv_path, geojson_path
 
 
 def run_inference(data_dir=None, models_dir=None, model_name=None, tail_files=None, target_t0=None,
@@ -550,7 +554,7 @@ def run_inference(data_dir=None, models_dir=None, model_name=None, tail_files=No
     # stale (gap), max() tetap kasih titik terbaru yang jadi acuan mayoritas.
     t0_label = anchors_df["window_end_time"].max()
 
-    csv_path, geojson_path = save_forecast_outputs(
+    run_dir, csv_path, geojson_path = save_forecast_outputs(
         detail_df, model_name, damping_factor, output_dir=output_dir, run_timestamp=run_timestamp,
         t0_label=t0_label,
     )
@@ -558,6 +562,7 @@ def run_inference(data_dir=None, models_dir=None, model_name=None, tail_files=No
     return {
         "detail_df": detail_df,
         "anchors_df": anchors_df,
+        "run_dir": run_dir,
         "csv_path": csv_path,
         "geojson_path": geojson_path,
         "n_used": n_used,

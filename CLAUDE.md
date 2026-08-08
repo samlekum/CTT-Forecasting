@@ -1353,9 +1353,14 @@ smoke-test end-to-end pakai data asli `data_bandung/` (bukan sintetis).
 6. **Retensi**: TIMESTAMPED, riwayat semua run disimpan (BUKAN overwrite
    "latest") -- **nama model DAN t0 ikut masuk ke nama file** (revisi dari
    plan pertama yang cuma nama model di kolom CSV, lalu direvisi LAGI
-   setelah Dhika minta t0 juga masuk nama file -- lihat CATATAN REVISI):
-   `forecast_output/forecast_{model_name}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}.csv`
-   / `.geojson`. `t0` = `window_end_time` yang BENAR-BENAR kepakai (titik
+   setelah Dhika minta t0 juga masuk nama file -- lihat CATATAN REVISI).
+   **KOREKSI (§21, sesi lanjutan)**: struktur asli di sini FLAT (2 file
+   langsung di `forecast_output/`) SUDAH DIRESTRUKTUR jadi folder-per-run
+   (`forecast_output/{model_name}_t0..._run.../forecast.csv`/`.geojson`,
+   pola sama dgn `visualizations/` Stage 06) -- lihat §21 utk struktur
+   final & alasannya, bagian di bawah ini historis/sudah usang:
+   ~~`forecast_output/forecast_{model_name}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}.csv`
+   / `.geojson`~~. `t0` = `window_end_time` yang BENAR-BENAR kepakai (titik
    observasi terakhir dari window, otomatis terisi walau `--t0` tidak
    dioverride -- representasi "forecast ini buat kapan"), `run` = kapan
    script-nya dieksekusi (representasi "kapan file ini dibuat" -- beda
@@ -2115,5 +2120,100 @@ terminal asli sebelum dianggap final.
   (cell jadi jauh lebih kecil) atau butuh presisi geometri eksak,
   pertimbangkan `n_samples` lebih besar atau intersection library
   (shapely, dependency baru) -- belum dibutuhkan sejauh grid 5x7 ini.
+
+---
+
+## 21. Restrukturisasi output Stage 05 jadi folder-per-run (samain pola Stage 06)
+
+**STATUS SINGKAT**: Stage 05 tadinya nyimpen 2 file FLAT langsung di
+`forecast_output/` (`forecast_{model}_t0..._run....csv`/`.geojson`).
+Diminta Dhika: samain ke pola Stage 06 (folder dulu, baru file di
+dalamnya) -- retensi (timestamped per run, riwayat semua run disimpan,
+BUKAN overwrite "latest") TETAP SAMA, cuma strukturnya jadi folder.
+
+### Struktur baru
+
+```
+forecast_output/{model_name}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}/
+    forecast.csv
+    forecast.geojson
+```
+
+Nama folder PERSIS pola Stage 06 (`{model}_t0..._run...`, TANPA prefix
+`forecast_` -- prefix itu sekarang cuma nempel di nama file DI DALAM
+folder). Nama file di dalam folder disederhanakan jadi generic
+`forecast.csv`/`forecast.geojson` (bukan diulang lagi nama model/t0/run)
+-- identitas run sudah disandang nama folder, ngulang di nama file jadi
+redundan.
+
+### Implementasi
+
+- **`pipeline/inference.py::save_forecast_outputs()`**: bikin
+  `run_dir = {output_dir}/{model_name}_t0{t0_str}_run{run_timestamp}`
+  (`os.makedirs(..., exist_ok=True)`), simpan `forecast.csv`/
+  `forecast.geojson` DI DALAM `run_dir`. Return jadi `(run_dir, csv_path,
+  geojson_path)` -- nambah `run_dir`, konsisten sama pola
+  `visualize.build_output_paths()` yang return `(run_dir, frames_dir,
+  gif_path)`.
+- **`pipeline/inference.py::run_inference()`**: tangkap `run_dir`, masukin
+  ke return dict (`result["run_dir"]`).
+- **`scripts/05_run_inference.py`**: tambah baris ringkasan `Folder
+  output` (isi `result['run_dir']`), sebelum `Output CSV`/`Output
+  GeoJSON` -- mirror gaya `06_visualize.py` (`Folder frame` + `GIF`
+  terpisah).
+- **`pipeline/visualize.py`**: `FORECAST_FILENAME_RE` (match nama FILE)
+  diganti `FORECAST_FOLDER_RE` (match nama FOLDER, TANPA prefix
+  `forecast_`/suffix `.csv`). `discover_forecast_files()` sekarang scan
+  SUBFOLDER `forecast_dir` (`os.path.isdir(...)`), match nama folder ke
+  regex, verifikasi `forecast.csv` ADA di dalamnya (folder cocok pola
+  tapi `forecast.csv` tidak ada -> skip diam2, bukan crash). Kolom
+  `path` di hasil tetap nunjuk ke file `forecast.csv` (bukan folder),
+  jadi `load_forecast_csv()` TIDAK perlu berubah sama sekali. Kolom
+  `filename` sekarang isi NAMA FOLDER (bukan nama file lagi -- nama file
+  di dalam folder generic/sama semua, tidak informatif kalau dipakai di
+  label menu). `visualize_forecast()`: waktu `--csv` dikasih langsung
+  (skip menu), model/t0/run diparse dari NAMA FOLDER INDUK
+  (`os.path.basename(os.path.dirname(csv_path))`), BUKAN dari nama file
+  CSV-nya (yang sekarang generic).
+- **`pipeline/config.py`**: update komentar `INFERENCE_DIR` (folder-per-
+  run, bukan "nama file timestamped").
+
+### File FLAT lama -- TIDAK ada migrasi, diperlakukan sama persis "pola lama"
+
+File hasil Stage 05 versi SEBELUM restrukturisasi ini (`forecast_{model}_
+t0..._run....csv` langsung di `forecast_output/`, bukan di dalam folder)
+otomatis TIDAK ke-discover lagi (bukan subfolder) -- **TIDAK dihapus dari
+disk**, cuma tidak muncul lagi di menu `06_visualize.py`. Ini KONSISTEN
+dgn precedent yang sudah ada sejak fitur t0-di-nama-file ditambahkan
+(§19: pola nama super-lama, sebelum t0 ada di nama file, sudah lebih dulu
+diabaikan diam2 + 1 baris ringkasan jumlah) -- sekarang precedent yang
+sama diperluas ke "file flat dari sebelum restrukturisasi folder-per-run
+ini" juga.
+
+### Divalidasi (data ASLI, `--tail-files 30 --workers 1`)
+
+1. **Struktur folder**: `forecast_output/lightgbm_t020260731_2320_
+   run20260809_0447/` kebentuk berisi PERSIS `forecast.csv` +
+   `forecast.geojson`, TIDAK ada file flat baru di root
+   `forecast_output/`.
+2. **Discovery Stage 06**: `discover_forecast_files()` nemuin folder BARU
+   ini dgn benar (model/t0/run kebaca dari nama folder), **16 file flat
+   LAMA** (sisa dari sebelum restrukturisasi) diabaikan diam2 dgn 1 baris
+   ringkasan ("16 file forecast_*.csv pola LAMA (flat, dari sebelum Stage
+   05 direstruktur jadi folder-per-run) diabaikan").
+3. **`--csv` override langsung**: `06_visualize.py --csv
+   ".../forecast.csv"` -> model/t0/run terparse BENAR dari nama folder
+   induk (`lightgbm`/`20260731_2320`/`20260809_0447`), render 18 frame
+   sukses.
+4. **Menu auto-pick** (tanpa `--csv`, 1 kandidat): berhasil auto-pick
+   folder BARU itu, hasil render identik dgn poin 3 (idempotent, folder
+   Stage 06 sama di-overwrite, bukan duplikat -- perilaku existing tidak
+   berubah).
+5. **Sanity data**: cek visual frame step 1 -- Input & Prediksi konsisten
+   (wajar, step 1 dekat sekali dgn observasi asli), status "35 aman, 0
+   waspada, 0 bahaya" (TBB 278-289K, semua > threshold 270 -- benar),
+   placeholder Aktual/Error Map muncul benar (forecast ke masa depan
+   genuine, belum ada observasi). Tidak ada perubahan LOGIKA rollout/
+   fitur/model -- murni lokasi file output yang berubah.
 
 ---

@@ -178,7 +178,8 @@ ctt-forecasting-expanding/
 │   ├── 04_recursive_evaluate.py     # ✅ SELESAI -- eval recursive per t0,
 │   │                                 # MAE per step + metrik spasial (§15),
 │   │                                 # flag --damping-factor (§17 poin 5)
-│   ├── 05_run_inference.py          # BELUM dibahas -- sesi berikutnya
+│   ├── 05_run_inference.py          # ✅ SELESAI -- forecast produksi, auto-detect
+│   │                                 # model dari hasil 04, flag --t0/--model/--damping-factor (§19)
 │   ├── 06_visualize.py              # BELUM dibahas -- sesi berikutnya
 │   ├── pipeline/
 │   │   ├── config.py                # terpusat: FTP, path, LAG_COUNT (lama),
@@ -201,7 +202,7 @@ ctt-forecasting-expanding/
 │   │   ├── recursive_eval.py        # ✅ SELESAI -- rollout recursive vectorized
 │   │   │                             # lintas anchor, spatial_collapse_ratio/correlation
 │   │   │                             # (§15), _apply_damping() buat fix exposure bias (§17)
-│   │   ├── inference.py             # BELUM dibahas
+│   │   ├── inference.py             # ✅ SELESAI -- lihat §19
 │   │   └── utils.py
 │   ├── tools/                       # diagnostic scripts, pola serupa repo lama.
 │   │   │                             # (validate_expanding_features.py justru ada di
@@ -1189,10 +1190,11 @@ adalah hasil split yang sudah dipurge (per 2026-08-08).
 - ~~Re-sweep `damping_factor` pasca-retrain+purge~~ -- **SUDAH**, lihat
   §18.9 di bawah. **KESIMPULAN BERUBAH dari §17 poin 6**: `damping_factor=0.9`
   TIDAK LAGI optimal.
-- `pipeline/inference.py` / `05_run_inference.py` -- masih BELUM dibahas
-  sama sekali (tetap seperti §10/§17).
+- ~~`pipeline/inference.py` / `05_run_inference.py`~~ -- **SUDAH**, lihat §19.
 - `_backup_before_leakage_fix_<timestamp>/` ada di root repo -- bukan
   bagian permanen pipeline, hapus manual kalau sudah tidak diperlukan.
+- `pipeline/visualize.py` / `06_visualize.py` -- masih BELUM dibahas sama
+  sekali (tetap seperti §10).
 
 ### 18.9 Hasil re-sweep `damping_factor` (model noise_std=2.5 + split terpurge)
 
@@ -1305,5 +1307,290 @@ noise_std, skema training, ATAU prioritas horizon (mis. jadi lebih peduli
 step awal) berubah, WAJIB re-sweep ulang & re-evaluasi trade-off per
 rentang step -- jangan asumsikan `1.0` tetap optimal selamanya atau untuk
 semua tujuan.
+
+---
+
+## 19. Stage 05/06: `pipeline/inference.py` + `scripts/05_run_inference.py` (BARU, SELESAI)
+
+**STATUS SINGKAT**: Stage 05 (inference) yang dari awal §10 ditandai "BELUM
+dibahas sama sekali, jangan diasumsikan desainnya" sekarang sudah dirancang
+& diimplementasi lewat sesi diskusi terpisah (pakai plan mode, plan
+DITOLAK sekali & direvisi berdasar feedback konkret sebelum diterima) +
+smoke-test end-to-end pakai data asli `data_bandung/` (bukan sintetis).
+`06_visualize.py` TETAP belum dibahas.
+
+### 19.1 Keputusan desain (final, dikonfirmasi user)
+
+1. **Trigger**: batch terjadwal, full grid 35 pixel. Scheduling (cron/Task
+   Scheduler) di luar scope script ini -- sama seperti 01-04, tidak
+   self-schedule, cuma perlu aman dijalankan berulang.
+2. **Sumber data**: baca file `.nc` yang SUDAH ada di `data_bandung/`
+   langsung -- BUKAN fetch FTP baru, BUKAN pakai `EXPANDING_RAW_CACHE_FILE`
+   (cache itu snapshot dataset training, bukan data real-time terbaru).
+3. **Model**: SATU model production, dipilih **OTOMATIS** dari hasil
+   AKTUAL `04_recursive_evaluate.py` (`evaluation/recursive_mae_summary.csv`,
+   file baseline damping_factor=1.0) -- **TIDAK di-hardcode** (revisi dari
+   plan pertama yang sempat hardcode `"lightgbm"`). Kriteria: rata-rata MAE
+   terendah di `Config.INFERENCE_PRIORITY_STEP_RANGE = (12, 18)` (prioritas
+   horizon panjang, ikut kesimpulan final §18.9). User tetap bisa override
+   manual via `--model`.
+4. **t0 (titik referensi waktu)**: default = data TERBARU yang tersedia
+   (BUKAN t0 tetap/hardcode) -- tapi bisa dioverride manual via `--t0`
+   (revisi dari plan pertama yang cuma asumsikan "selalu data terbaru").
+   **Semantik `--t0`**: titik waktu observasi TERAKHIR yang jadi basis
+   window (BUKAN `anchor_t0` versi codebase yang berarti titik AWAL
+   window) -- forecast dimulai dari `t0 + FREQ_MINUTES menit`. Dipilih
+   makna ini karena paling natural buat user ("data terbaru 2 Juli, t0 =
+   2 Juli").
+5. **Output**: DUA file per run -- CSV tabular (12 kolom, satu baris per
+   pixel×step) + GeoJSON (SATU `FeatureCollection` per run, satu `Feature`
+   per pixel/Point, 18 step forecast di-embed di `properties.forecast`,
+   BUKAN 18 file terpisah). `scripts/geojson/KotaBandung.geojson` yang
+   sudah ada di repo TERNYATA cuma batas administratif 30 kecamatan (GADM,
+   `NAME_3`/`TYPE_3`="Kecamatan"), TIDAK match skema grid pixel
+   (`lat_idx`/`lon_idx`/`pixel_id`) -- jadi GeoJSON forecast ini file BARU
+   & independen, bukan hasil join ke file itu.
+6. **Retensi**: TIMESTAMPED, riwayat semua run disimpan (BUKAN overwrite
+   "latest") -- **nama model DAN t0 ikut masuk ke nama file** (revisi dari
+   plan pertama yang cuma nama model di kolom CSV, lalu direvisi LAGI
+   setelah Dhika minta t0 juga masuk nama file -- lihat CATATAN REVISI):
+   `forecast_output/forecast_{model_name}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}.csv`
+   / `.geojson`. `t0` = `window_end_time` yang BENAR-BENAR kepakai (titik
+   observasi terakhir dari window, otomatis terisi walau `--t0` tidak
+   dioverride -- representasi "forecast ini buat kapan"), `run` = kapan
+   script-nya dieksekusi (representasi "kapan file ini dibuat" -- beda
+   dari `t0` kalau backtest pakai `--t0` masa lalu). Sampai MENIT, bukan
+   detik.
+
+### 19.2 Implementasi
+
+**`pipeline/inference.py`** (fungsi baru, urutan pemanggilan dari `run_inference()`):
+- `load_recent_window_data(data_dir, tail_files, target_t0, ...)` -- baca
+  `Config.INFERENCE_TAIL_FILES` (100) file TERAKHIR (mundur dari `target_t0`
+  kalau diisi, BUKAN dari file paling akhir -- supaya `--t0` di masa lalu
+  tidak salah baca file yang tidak relevan/buang I/O). Reuse VERBATIM
+  `dataset_builder.discover_nc_files/build_uniform_timeline/load_pixel_grid`.
+  **WAJIB slice `entries` SEBELUM dilempar ke 2 fungsi itu** -- keduanya
+  baca SEMUA entries tanpa filter internal, lupa slice = re-trigger
+  bottleneck I/O berjam-jam (§16).
+- `select_anchor_per_pixel(data_matrix, timeline, pixel_meta, window_size, target_t0)`
+  -- reuse VERBATIM `dataset_builder.find_valid_anchors(span=MIN_WINDOW_SIZE)`
+  (BUKAN `ANCHOR_SPAN` -- inference cuma butuh window bootstrap bebas-gap,
+  bukan horizon depan bebas-gap karena itu justru yang mau diprediksi),
+  ambil anchor PALING BARU yang window-nya berakhir di/sebelum `target_t0`
+  (atau tanpa batas kalau `target_t0=None`). Pixel tanpa anchor valid =
+  skip dgn counter (bukan crash), pola sama seperti `_map_anchors_to_indices()`.
+- `select_inference_model(eval_summary_path, priority_step_range)` -- baca
+  `recursive_mae_summary.csv`, filter step di `priority_step_range`,
+  `groupby("model")["mae"].mean()`, ambil terkecil. Return juga
+  `ranking_df` lengkap (transparansi, CLI print alasan pemilihan, bukan
+  black-box). File tidak ada -> `FileNotFoundError` arahkan ke `04_recursive_evaluate.py`.
+- `run_forecast_rollout(model, anchors_df, data_matrix, timeline, damping_factor)`
+  -- loop rollout BARU (bukan panggil `run_recursive_evaluation()`
+  langsung): alasan konkret, `run_recursive_evaluation()` meng-index
+  `timeline[target_idx]`/`data_matrix[target_idx,...]` karena anchor
+  evaluasi historis (window & target sama-sama ada di matrix). Target
+  masa depan inference TIDAK ADA di matrix -- `target_time` WAJIB dihitung
+  via aritmatika waktu (`anchor_t0 + L*FREQ_MINUTES`, `L`=panjang window
+  SEBELUM extend step ini -- identik matematis dgn `target_idx=starts+L`
+  di `run_recursive_evaluation`, diverifikasi manual formula-nya sama
+  persis, cuma domain beda: waktu vs index). Yang di-reuse (bukan
+  diduplikasi): `compute_window_features_matrix()` & `_apply_damping()`
+  (import langsung dari `recursive_eval.py`, BUKAN re-derive formula).
+- `build_geojson_feature_collection()`, `save_forecast_outputs()`,
+  `run_inference()` (orchestrator) -- lihat source untuk detail.
+
+**`scripts/05_run_inference.py`**: ikuti pola persis `04_recursive_evaluate.py`.
+Flag: `--data-dir`, `--models-dir`, `--model` (default `None`=auto-detect),
+`--t0` (default `None`=data terbaru), `--tail-files` (default `Config.INFERENCE_TAIL_FILES`),
+`--damping-factor` (default `1.0`, help text eksplisit bilang "0.9 sudah
+usang, lihat §18.9"), `--output-dir`, `--workers`.
+
+**`config.py`** tambahan: `INFERENCE_TAIL_FILES=100` (~16,7 jam cakupan,
+biaya I/O ~54 detik terukur -- lihat 19.3), `INFERENCE_PRIORITY_STEP_RANGE=(12,18)`,
+`INFERENCE_DIR=forecast_output/` (sudah ada di `.gitignore`). **TIDAK ADA**
+`INFERENCE_MODEL_NAME` (sengaja, model tidak hardcode -- lihat 19.1 poin 3).
+
+### 19.3 Verifikasi (data ASLI `data_bandung/`, sampai 2026-07-31, BUKAN sintetis)
+
+Semua PASS:
+1. **Smoke run default** (`--tail-files 30 --workers 1`): 35/35 pixel
+   ke-forecast, model auto-detect = `lightgbm` (avg MAE=12,0054K, cocok
+   persis dgn ranking manual §18.9), 2 file output ke-generate dgn nama
+   `forecast_lightgbm_<timestamp>.{csv,geojson}`.
+2. **Struktur output**: CSV 12 kolom persis sesuai spesifikasi, 630 baris
+   (35 pixel × 18 step, tanpa gap/dupe step per pixel), `target_time` naik
+   tepat 10 menit per step. GeoJSON valid, 35 feature (1 per pixel),
+   `geometry.coordinates` cocok `[longitude, latitude]` pixel, tiap
+   `properties.forecast` persis 18 entri.
+3. **Sanity damping**: `--damping-factor 1.0` (default) -> `y_pred ==
+   y_pred_raw` di SEMUA baris (`_apply_damping` benar2 no-op). `--damping-factor
+   0.8` -> identik di step 1 (formula no-op by design di step 1), BEDA di
+   step>=2 (delta diredam ke arah `last_value`, terverifikasi arah &
+   magnitude-nya masuk akal).
+4. **Model manual override** (`--model catboost`): log eksplisit bilang
+   "manual via --model" (bukan auto-detect), nama file pakai `forecast_catboost_*`.
+5. **`--t0` historis** (`--t0 "2026-03-15 12:00"`): terverifikasi
+   `window_end_time` yang dipakai PERSIS `2026-03-15 12:00:00` (bukan data
+   terbaru/2026-07-31) -- pembacaan file terverifikasi mundur dari t0 (cuma
+   baca file di sekitar Maret, BUKAN baca s.d. Juli lalu filter).
+6. **Skip-path total**: `--tail-files 1` (dijamin < `MIN_WINDOW_SIZE=6`)
+   -> `ValueError` jelas ("naikkan --tail-files..."), ditangkap CLI dgn
+   rapi (bukan traceback mentah), exit bersih.
+7. **Full-default run** (`--tail-files 100`, workers default, data asli):
+   **54,3 detik wall-clock** (2 kali run, konsisten), 35/35 pixel
+   ke-forecast (0 skip -- data terbaru bersih, tanpa gap dekat ujung).
+   Jauh di bawah estimasi worst-case plan (45-130s) -- di ujung cepat
+   karena data bersih (tidak perlu scan jauh ke belakang buat cari window
+   valid).
+
+**Partial-skip TIDAK dites eksplisit di data asli** (data terbaru saat
+verifikasi ini kebetulan bersih, tidak ada pixel yang gagal) -- tapi
+mekanismenya (per-pixel `find_valid_anchors`) adalah fungsi yang SAMA
+persis yang sudah divalidasi ekstensif di `validate_no_leakage.py`
+(skenario gap & sparse-month, §18.4), jadi risikonya rendah. Kalau
+operasional nanti nemuin kasus partial-skip yang aneh, cek dulu ke situ
+sebelum curiga ada bug baru di `inference.py`.
+
+### 19.4 Belum dikerjakan / di luar scope
+
+- `pipeline/visualize.py` / `06_visualize.py` -- masih belum dibahas sama
+  sekali.
+- Scheduling OS-level (Windows Task Scheduler / cron) buat batch terjadwal
+  -- di luar scope kode ini, tanggung jawab operasional user.
+- Partial-skip belum diverifikasi di data asli (lihat 19.3) -- kalau mau
+  lebih yakin, bisa dites pakai `--tail-files` kecil (6-10) di periode
+  data yang diketahui ada gap/cloud cover, atau tunggu kejadian natural.
+
+### CATATAN REVISI (setelah smoke-test awal, dari feedback Dhika langsung)
+
+- **Format timestamp nama file** direvisi dari `%Y%m%d_%H%M%S` (sampai
+  detik) jadi `%Y%m%d_%H%M` (sampai menit saja) -- nama file lebih ringkas,
+  cukup buat retensi run batch terjadwal. Trade-off: 2 run model+t0 yang
+  sama dalam menit yang sama akan saling timpa (jarang terjadi buat batch
+  terjadwal, bukan on-demand rapid-fire).
+- **`t0` ditambahkan ke nama file** (revisi kedua, Dhika masih bingung
+  retensi cuma berdasar `run_timestamp` -- nggak kelihatan dari nama file
+  itu forecast buat t0 KAPAN, cuma keliatan kapan filenya DIBUAT). Fungsi
+  `save_forecast_outputs()` dapat parameter baru `t0_label` (diisi
+  `run_inference()` dari `anchors_df["window_end_time"].max()` -- SELALU
+  ada nilai, baik `--t0` dioverride maupun pakai data terbaru). Nama file
+  final: `forecast_{model}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}.{csv,geojson}`.
+  Divalidasi 2 skenario: `--t0 "2026-05-10 06:00:00"` ->
+  `forecast_lightgbm_t020260510_0600_run20260809_0105.csv`; default (data
+  terbaru) -> `forecast_lightgbm_t020260731_2320_run20260809_0106.csv`
+  (t0 otomatis = window_end_time data terbaru, BUKAN "unknown"/kosong).
+- **`y_pred` == `y_pred_raw` di CSV** sempat dikira aneh/bug oleh Dhika --
+  **BUKAN bug**, ini perilaku BY DESIGN: default `--damping-factor=1.0`
+  bikin `_apply_damping()` no-op (return `raw_pred` apa adanya), jadi kedua
+  kolom identik. Pola ini SAMA PERSIS dgn `recursive_evaluation.csv` di
+  Stage 4 (§17 poin 5) -- `y_pred_raw` disimpan buat perbandingan kalau
+  `--damping-factor < 1.0` dipakai (kolom baru beda, sudah diverifikasi di
+  19.3 poin 3). Tidak ada perubahan kode buat ini, cuma klarifikasi.
+- **`anchor_t0` (22:30) vs `target_time` step 1 (23:30) beda 60 menit**,
+  bukan 10 menit -- sempat bikin bingung Dhika. **BUKAN bug**: `anchor_t0`
+  = titik AWAL window (6 titik observasi, `MIN_WINDOW_SIZE`), bukan titik
+  observasi TERAKHIR. Step 1 = 10 menit setelah titik TERAKHIR window
+  (`window_end_time`), bukan 10 menit setelah `anchor_t0`. Jaraknya =
+  `MIN_WINDOW_SIZE*FREQ_MINUTES` = 60 menit, persis definisi IS1=[1..6]/
+  OS1=[7] di CLAUDE.md §2. Konsekuensi praktis: **`--t0` = `window_end_time`**
+  (titik observasi TERAKHIR, sesuai desain 19.1 poin 4), BUKAN `anchor_t0`
+  -- jadi kalau mau forecast 3 jam ke depan DARI jam 06:00, isi `--t0
+  06:00:00` LANGSUNG, JANGAN dikurangi 1 jam jadi `05:00:00` (sudah
+  diverifikasi: `--t0 06:00:00` -> `window_end_time=06:00:00`,
+  `anchor_t0` otomatis mundur sendiri jadi `05:10:00`, step 1 =
+  `06:10:00`, step 18 = `09:00:00`).
+
+### 19.5 Fitur tambahan: `y_true`/`abs_error` (perbandingan ke observasi asli, opsional)
+
+Diminta Dhika setelah lihat output pertama: tambahkan nilai `tbb_13` ASLI
+(bukan cuma prediksi) buat tahu seberapa besar error tiap step -- berguna
+sebagai **backtest manual**: kalau `--t0` diisi ke masa lalu yang "masa
+depan"-nya (target_time) kebetulan SUDAH ada di `data_bandung/` (karena
+arsip lokal sudah py unya data s.d. 2026-07-31), bisa langsung dibandingkan
+prediksi vs kenyataan tanpa perlu tunggu waktu beneran lewat.
+
+**`load_actual_values(detail_df, data_dir, ...)`** (baru, `pipeline/inference.py`):
+scan `data_bandung/` buat file yang timestamp-nya masuk rentang
+`[min(target_time), max(target_time)]` dari `detail_df`, baca via
+`load_pixel_grid` (reuse verbatim), bangun lookup `{(pixel_id, timestamp):
+nilai}`. Kalau TIDAK ADA file yang cocok (forecast produksi murni, masa
+depan genuine belum terjadi/didownload) -> return dict KOSONG, BUKAN
+error -- ini kondisi NORMAL, bukan kegagalan.
+
+`run_inference()` panggil ini SETELAH `run_forecast_rollout()` (sengaja
+dipisah -- rollout tetap fokus prediksi murni, pencarian observasi asli
+jadi langkah opsional terpisah yang boleh kosong tanpa mengganggu hasil
+utama), lalu isi kolom `y_true` (lookup per `(pixel_id, target_time)`,
+`NaN` kalau tidak ketemu) & `abs_error = abs(y_pred - y_true)` (otomatis
+`NaN` juga kalau `y_true` NaN).
+
+**Output**: CSV `CSV_COLUMNS` bertambah jadi 14 kolom (`y_true`,
+`abs_error` disisipkan setelah `y_pred_raw`, sebelum `model_name`/
+`damping_factor`). GeoJSON: tiap entri `forecast` di `properties` juga
+dapat `y_true`/`abs_error` -- **`None` (JSON `null`) buat NaN**, BUKAN
+`NaN` literal (itu bukan JSON valid, `json.dump` Python defaultnya nulis
+`NaN` literal kalau tidak di-guard manual -- WAJIB `None if pd.isna(...)
+else float(...)`). CLI (`05_run_inference.py`) print tabel MAE aktual per
+step di ringkasan akhir KALAU ada minimal 1 baris dgn `y_true` non-NaN,
+kalau tidak ada sama sekali cuma info singkat (bukan tabel kosong).
+
+**Divalidasi** (data asli, 2 skenario):
+- `--t0 "2026-05-10 06:00:00"` (masa lalu, ~2,5 bulan sebelum data
+  terakhir 2026-07-31): **630/630 baris** (35 pixel × 18 step) ketemu
+  observasi asli, MAE aktual per step ke-print (step 1 ~1,27K naik ke
+  step 13 ~8,58K, turun lagi ke step 18 ~6,86K -- wajar untuk SATU
+  instance/anchor tunggal, bukan rata-rata ribuan anchor kayak
+  `recursive_mae_summary.csv`, jadi tidak harus monoton naik).
+- Default (data terbaru, target_time genuinely di masa depan 2026-07-31
+  23:30 dst): **0/630 baris** ketemu observasi (diverifikasi CSV `y_true`
+  semua `NaN`, GeoJSON semua `null`, valid JSON -- di-parse ulang berhasil
+  tanpa error), CLI print info "tidak ada observasi asli" (bukan tabel
+  kosong/crash).
+
+### 19.6 Audit ulang kode Stage 05 (diminta Dhika, setelah semua fitur di atas)
+
+Review baris-per-baris seluruh `pipeline/inference.py` + `05_run_inference.py`
++ tambahan `config.py`. **1 bug nyata & berisiko tinggi ketemu, sudah
+diperbaiki & diverifikasi**:
+
+**BUG: `--tail-files 0` (atau negatif) tidak divalidasi, diam-diam baca
+SELURUH riwayat `data_bandung/`** -- `entries[-tail_files:]` di Python
+TIDAK error untuk `tail_files<=0`: `entries[-0:]` (tail_files=0) balik
+jadi `entries[0:]` (SEMUA entries, karena `-0 == 0` di Python -- tidak ada
+negative zero buat integer), dan `entries[-(-5):]` (tail_files=-5) jadi
+`entries[5:]` (bukan "5 file terakhir", tapi "semua KECUALI 5 file
+pertama"). Tanpa guard, ini re-trigger PERSIS bottleneck I/O berjam-jam
+(§16) yang jadi alasan `--tail-files` ini didesain sejak awal. **Diperparah
+bug kedua**: log ringkasan CLI pakai `args.tail_files or
+cfg.INFERENCE_TAIL_FILES` -- `0` itu falsy di Python, jadi `0 or 100`
+jatuh ke `100`, log salah nampilin "Tail files: 100" padahal yang
+BENERAN dipakai `0` (mustinya paling gampang ketauan operator justru dari
+log ini, tapi malah nyembunyiin masalahnya).
+
+**Fix**: (1) `load_recent_window_data()` sekarang validasi eksplisit
+`if tail_files < 1: raise ValueError(...)` SEBELUM slicing manapun
+(melindungi kedua jalur -- `--t0` diisi maupun tidak, karena keduanya
+pakai pola slicing yang sama rentan). (2) Log CLI diganti dari `args.tail_files
+or cfg.INFERENCE_TAIL_FILES` jadi `args.tail_files if args.tail_files is
+not None else cfg.INFERENCE_TAIL_FILES` (`is not None`, bukan `or` --
+supaya `0` tetap tampil sebagai `0`, bukan disulap jadi default).
+
+**Divalidasi**: `--tail-files 0` -> error cepat & jelas ("--tail-files
+harus >= 1, dapat 0"), TIDAK mencoba baca file sama sekali. `--tail-files
+-5` -> error serupa. Regression test `--tail-files 30` (jalur normal) --
+tetap jalan seperti biasa, 35/35 pixel, output tidak berubah.
+
+**Area lain yang diperiksa TIDAK ketemu bug** (diverifikasi logikanya,
+bukan cuma dibaca sekilas): `select_anchor_per_pixel()`'s pembatasan
+`target_t0` (redundan-tapi-aman terhadap `load_recent_window_data`,
+bukan bug); asumsi `window_size` seragam lintas pixel di
+`run_forecast_rollout()` (valid, `window_size` memang parameter tunggal
+bukan per-pixel); alignment `pixel_id` antara `load_actual_values()`'s
+`load_pixel_grid()` terpisah vs yang dipakai forecast (aman, sama-sama
+dari grid canonical yang konsisten); NaN handling di `abs_error` &
+GeoJSON `None`-cast (benar); kemungkinan `HORIZON_STEPS=0`/`MIN_WINDOW_SIZE<2`
+bikin crash di rollout (sudah dicegah `assert` di `config.py`, tidak
+reachable dari CLI manapun).
 
 ---

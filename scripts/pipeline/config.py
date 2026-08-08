@@ -167,6 +167,46 @@ class Config:
     # Fraksi test default untuk stratified_monthly_split() di Tahap 3.
     TEST_FRAC = 0.15
 
+    # ------------------------------------------------------------------
+    # Konfigurasi khusus INFERENCE (Tahap 6 / 05_run_inference.py). Baca
+    # file .nc TERBARU di FINAL_BASE_DIR (data_bandung/) langsung -- BUKAN
+    # fetch FTP baru, BUKAN pakai EXPANDING_RAW_CACHE_FILE (cache itu
+    # snapshot dataset training, bukan data real-time terbaru). Lihat
+    # pipeline/inference.py.
+    # ------------------------------------------------------------------
+
+    # Jumlah file .nc TERAKHIR (kronologis, bukan random) yang dibaca dari
+    # FINAL_BASE_DIR untuk cari window observasi terbaru per pixel (atau
+    # window di sekitar --t0 kalau dioverride, lihat inference.py). WAJIB
+    # slice SEBELUM dilempar ke build_uniform_timeline()/load_pixel_grid()
+    # -- 2 fungsi itu baca SEMUA entries yang dikasih tanpa filter internal
+    # apapun, dan data_bandung/ berisi puluhan ribu file historis (lupa
+    # slice = re-trigger bottleneck I/O berjam-jam, lihat CLAUDE.md §16).
+    # 100 file = ~16,7 jam cakupan (10 menit/file) -- cukup toleran untuk
+    # pixel yang cloud-covered berjam-jam (MIN_WINDOW_SIZE=6 titik/50 menit
+    # bebas-NaN dicari mundur dari file terbaru/--t0), sementara biaya baca
+    # tetap murah (puluhan detik, jauh di bawah baca seluruh riwayat).
+    # Naikkan lewat --tail-files kalau operasional nunjukkin banyak pixel
+    # ke-skip.
+    INFERENCE_TAIL_FILES = 100
+
+    # Rentang step (inklusif) yang dipakai select_inference_model() buat
+    # milih model production OTOMATIS dari evaluation/recursive_mae_summary.csv
+    # (hasil 04_recursive_evaluate.py) -- BUKAN dihardcode nama modelnya di
+    # sini, karena model terbaik bisa berubah tiap kali dataset/training
+    # berubah. Range (12, 18) = prioritas horizon panjang, sesuai kesimpulan
+    # final CLAUDE.md §18.9: metode rekursif bikin error terakumulasi paling
+    # signifikan di step-step akhir -- itu ujian utama kualitas model,
+    # bukan step awal yang secara inheren lebih gampang diprediksi (window
+    # masih didominasi observasi real).
+    INFERENCE_PRIORITY_STEP_RANGE = (12, 18)
+
+    # Direktori output forecast (Tahap 6). SUDAH ada di .gitignore
+    # (forecast_output/) -- riwayat run TIDAK di-commit, tapi TETAP
+    # disimpan lokal per-run (nama file timestamped + nama model, BUKAN
+    # overwrite "latest") supaya bisa diaudit/dibandingkan lintas run.
+    INFERENCE_DIR = os.path.join(PROJECT_ROOT, "forecast_output")
+
     # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
     # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
     # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run

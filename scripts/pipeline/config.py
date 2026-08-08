@@ -231,9 +231,9 @@ class Config:
     # Direktori output visualisasi (Tahap 7). Sudah ada di .gitignore.
     VISUALIZATION_DIR = os.path.join(PROJECT_ROOT, "visualizations")
 
-    # Durasi tiap frame GIF (ms). 800ms/frame -> total ~14.4s utk 18
+    # Durasi tiap frame GIF (ms). 600ms/frame -> total ~10.8s utk 18
     # step, cukup lambat dibaca tapi tidak terlalu lama nunggu 1 putaran.
-    VISUALIZATION_FRAME_DURATION_MS = 800
+    VISUALIZATION_FRAME_DURATION_MS = 600
 
     # Path GeoJSON batas kecamatan Kota Bandung, dipakai sbg overlay
     # opsional di tiap panel peta (garis tipis, murni referensi visual --

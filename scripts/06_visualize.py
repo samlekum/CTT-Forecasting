@@ -33,7 +33,7 @@ def parse_args():
     )
     p.add_argument(
         "--frame-duration-ms", type=int, default=None,
-        help="Durasi tiap frame GIF (ms). Default: Config.VISUALIZATION_FRAME_DURATION_MS (800).",
+        help="Durasi tiap frame GIF (ms). Default: Config.VISUALIZATION_FRAME_DURATION_MS (600).",
     )
     p.add_argument(
         "--mask-outside-bandung", action="store_true",

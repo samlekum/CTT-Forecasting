@@ -1737,7 +1737,7 @@ generik, terima `class_labels`/`colors` sbg parameter).
 PIXEL_GRID_SHAPE = (5, 7)
 TBB_RISK_THRESHOLDS = (200.0, 270.0)
 VISUALIZATION_DIR = os.path.join(PROJECT_ROOT, "visualizations")
-VISUALIZATION_FRAME_DURATION_MS = 800
+VISUALIZATION_FRAME_DURATION_MS = 600
 KOTA_BANDUNG_GEOJSON = os.path.join(PROJECT_ROOT, "scripts", "geojson", "KotaBandung.geojson")
 ```
 
@@ -2034,33 +2034,24 @@ tidak ada off-by-one; potensi `vmin==vmax` di `imshow` (nilai seragam
 
 **Ronde audit KEDUA** (diminta Dhika lagi, "coba cek lagi baik-baik" --
 lebih ketat, termasuk cross-check `config.py`/`inference.py`, bukan cuma
-`visualize.py`): ketemu 2 hal tambahan, KEDUANYA bukan bug fungsional:
-1. **Drift dokumentasi**: komentar `Config.VISUALIZATION_FRAME_DURATION_MS`
-   di `config.py` bilang "~600ms/frame -> total ~10.8s", tapi nilai
-   aktualnya `800`. CLAUDE.md §20.7 & help text `--frame-duration-ms` di
-   `06_visualize.py` juga masih nyebut `600`. **Dikonfirmasi lewat GIF
-   asli** (`im.info.get('duration')` -> `800`, bukan `600`) bahwa `800`
-   itu nilai yang BENAR-BENAR terpakai -- comment/dokumentasi yang basi,
-   BUKAN kode yang salah. Fix: comment/CLAUDE.md/help text disamakan ke
-   `800`/`~14.4s` (nilai KODE tidak diubah, cuma teks penjelasnya).
-2. **False alarm sempat muncul**: satu pengecekan awal sempat baca
-   `Config.VISUALIZATION_FRAME_DURATION_MS` sbg `800` tapi GIF yang baru
-   di-generate menunjukkan `600` -- kelihatan kayak inkonsistensi
-   runtime. Ditelusuri: **`__pycache__` basi** (`scripts/pipeline/__pycache__/`
-   dkk), BUKAN bug logika. Setelah `__pycache__` dibersihkan total &
-   di-generate ulang, `Config`, kode, dan GIF SEMUA konsisten `800`.
-   Tidak ada perubahan kode dari temuan ini -- cuma pembersihan cache
-   & verifikasi ulang. `.gitignore` pattern `**pycache**/` (bukan
-   `__pycache__/` konvensional) sempat dicurigai jadi biang keladi cache
-   basi ini, tapi dites via `git check-ignore` -- TERBUKTI tetap match &
-   ignore `__pycache__/` dgn benar (glob `*` ganda setara `*` tunggal),
-   jadi BUKAN penyebab & TIDAK diubah.
+`visualize.py`): sempat curiga `Config.VISUALIZATION_FRAME_DURATION_MS`
+ketemu bernilai `800` padahal comment & CLAUDE.md §20.7 bilang `600` --
+ditelusuri (termasuk sempat curigai `__pycache__` basi di
+`scripts/pipeline/__pycache__/` dkk sbg biang inkonsistensi runtime yang
+sempat kebaca, sudah dibersihkan & dikonfirmasi BUKAN penyebab akar,
+`.gitignore` pattern `**pycache**/` juga dites via `git check-ignore` --
+TERBUKTI tetap match & ignore `__pycache__/` dgn benar, jadi bukan
+masalah). **Klarifikasi dari Dhika**: `800` itu perubahan manual Dhika
+sendiri (di luar sesi ini), `600` adalah nilai default yang memang
+dimaksud -- **dikembalikan ke `600`** (comment, `config.py`, help text
+`--frame-duration-ms` di `06_visualize.py`, CLAUDE.md §20.7, semuanya
+disamakan balik ke `600`/`~10.8s`). Tidak ada bug kode di balik ini,
+murni klarifikasi nilai default yang dimaksud.
 
-Semua fix di §20.14 (bug empty-CSV) dan revisi dokumentasi di atas
-di-regression-test ULANG dari `__pycache__` bersih setelah ronde audit
-kedua ini -- hasil konsisten (empty-CSV -> error bersih, normal path +
-`--mask-outside-bandung` -> 13/35 pixel, threshold/per-step/2-desimal
-semua masih benar).
+Semua fix di §20.14 (bug empty-CSV) di-regression-test ULANG dari
+`__pycache__` bersih setelah ronde audit kedua ini -- hasil konsisten
+(empty-CSV -> error bersih, normal path + `--mask-outside-bandung` ->
+13/35 pixel, threshold/per-step/2-desimal semua masih benar).
 
 ### 20.15 Belum dikerjakan / di luar scope sesi ini
 

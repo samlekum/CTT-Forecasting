@@ -42,6 +42,7 @@ models/
 
 # Processed Dataset
 dataset/
+evaluation/
 
 # Downloaded NetCDF Data
 data_bandung/

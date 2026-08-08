@@ -301,18 +301,20 @@ def run_forecast_rollout(model, anchors_df, data_matrix, timeline, horizon_steps
     return pd.concat(records, ignore_index=True)
 
 
-def load_actual_values(detail_df, data_dir=None, freq_minutes=None, n_workers=None):
+def load_raw_values_lookup(data_dir, min_time, max_time, freq_minutes=None, n_workers=None):
     """Cari nilai tbb_13 ASLI dari file .nc yang SUDAH ADA di `data_dir`
-    untuk rentang `target_time` di `detail_df` -- dipakai buat isi
-    `y_true`/`abs_error`. INI CUMA JALAN kalau file-nya beneran ada
-    (mis. --t0 di masa lalu dan "masa depan"-nya kebetulan sudah terjadi &
-    sudah didownload). Untuk forecast produksi murni (t0 = data terbaru,
-    target_time genuinely belum terjadi), tidak ada file yang ketemu --
-    return dict kosong, BUKAN error (masa depan asli memang belum ada).
+    untuk rentang waktu `[min_time, max_time]` (inklusif) -- fungsi INTI
+    yang di-reuse oleh `load_actual_values()` (Stage 05, rentang =
+    target_time forecast) DAN `pipeline/visualize.py::load_input_snapshot()`
+    (Stage 06, rentang = window_end_time/t0 per pixel) -- SATU tempat buat
+    logic "baca beberapa file .nc spesifik & bangun lookup per timestamp",
+    supaya kalau ada bug/perubahan di cara baca NetCDF, cuma 1 tempat yang
+    perlu diubah, bukan 2 implementasi terpisah yang bisa divergen.
 
-    TIDAK dipanggil dari run_forecast_rollout() -- sengaja dipisah supaya
-    rollout tetap fokus ke prediksi murni, pencarian observasi asli jadi
-    langkah terpisah & opsional (hasil kosong tidak menghentikan pipeline).
+    Kalau tidak ada file yang cocok rentang waktu ini (mis. genuinely masa
+    depan yang belum terjadi/didownload), return dict KOSONG, BUKAN error
+    -- itu kondisi NORMAL, bukan kegagalan (caller yang tentukan apa
+    artinya dict kosong buat use-case masing-masing).
 
     Return
     ------
@@ -320,19 +322,14 @@ def load_actual_values(detail_df, data_dir=None, freq_minutes=None, n_workers=No
     filenya ADA & nilainya bukan NaN (cloud-masked tetap dianggap "tidak
     ada" -- sama seperti gap-skip rule di tempat lain).
     """
-    if data_dir is None:
-        data_dir = Config.FINAL_BASE_DIR
-
-    min_time = pd.Timestamp(detail_df["target_time"].min())
-    max_time = pd.Timestamp(detail_df["target_time"].max())
+    min_time = pd.Timestamp(min_time)
+    max_time = pd.Timestamp(max_time)
 
     entries = discover_nc_files(data_dir)
     entries_in_range = [e for e in entries if min_time <= e[0] <= max_time]
     if not entries_in_range:
         say_info(
-            f"Tidak ada file .nc di {data_dir} untuk rentang target_time [{min_time}, {max_time}] "
-            "-- kemungkinan ini forecast produksi murni (masa depan asli belum terjadi/didownload). "
-            "Kolom y_true/abs_error akan NaN."
+            f"Tidak ada file .nc di {data_dir} untuk rentang waktu [{min_time}, {max_time}]."
         )
         return {}
 
@@ -347,6 +344,45 @@ def load_actual_values(detail_df, data_dir=None, freq_minutes=None, n_workers=No
             val = row[p_idx]
             if not np.isnan(val):
                 lookup[(pixel_id, pd.Timestamp(ts))] = float(val)
+
+    return lookup
+
+
+def load_actual_values(detail_df, data_dir=None, freq_minutes=None, n_workers=None):
+    """Cari nilai tbb_13 ASLI utk rentang `target_time` di `detail_df` --
+    dipakai buat isi `y_true`/`abs_error`. INI CUMA JALAN kalau file-nya
+    beneran ada (mis. --t0 di masa lalu dan "masa depan"-nya kebetulan
+    sudah terjadi & sudah didownload). Untuk forecast produksi murni (t0 =
+    data terbaru, target_time genuinely belum terjadi), tidak ada file
+    yang ketemu -- return dict kosong, BUKAN error (masa depan asli
+    memang belum ada).
+
+    Wrapper tipis di atas load_raw_values_lookup() (lihat docstring itu
+    utk alasan kenapa logic bacanya disentralkan) -- fungsi ini cuma
+    nentuin rentang waktu (dari target_time) & nge-log statistik
+    n_found/n_possible yang spesifik utk konteks evaluasi forecast.
+
+    TIDAK dipanggil dari run_forecast_rollout() -- sengaja dipisah supaya
+    rollout tetap fokus ke prediksi murni, pencarian observasi asli jadi
+    langkah terpisah & opsional (hasil kosong tidak menghentikan pipeline).
+
+    Return
+    ------
+    dict {(pixel_id, pd.Timestamp): float} -- lihat load_raw_values_lookup().
+    """
+    if data_dir is None:
+        data_dir = Config.FINAL_BASE_DIR
+
+    min_time = pd.Timestamp(detail_df["target_time"].min())
+    max_time = pd.Timestamp(detail_df["target_time"].max())
+
+    lookup = load_raw_values_lookup(data_dir, min_time, max_time, freq_minutes=freq_minutes, n_workers=n_workers)
+    if not lookup:
+        say_info(
+            "Kemungkinan ini forecast produksi murni (masa depan asli belum terjadi/didownload) -- "
+            "kolom y_true/abs_error akan NaN."
+        )
+        return lookup
 
     n_possible = len(detail_df)
     n_found = sum(

@@ -1310,14 +1310,14 @@ semua tujuan.
 
 ---
 
-## 19. Stage 05/06: `pipeline/inference.py` + `scripts/05_run_inference.py` (BARU, SELESAI)
+## 19. Stage 05: `pipeline/inference.py` + `scripts/05_run_inference.py` (SELESAI)
 
 **STATUS SINGKAT**: Stage 05 (inference) yang dari awal §10 ditandai "BELUM
 dibahas sama sekali, jangan diasumsikan desainnya" sekarang sudah dirancang
 & diimplementasi lewat sesi diskusi terpisah (pakai plan mode, plan
 DITOLAK sekali & direvisi berdasar feedback konkret sebelum diterima) +
 smoke-test end-to-end pakai data asli `data_bandung/` (bukan sintetis).
-`06_visualize.py` TETAP belum dibahas.
+`06_visualize.py` -- lihat §20 (SELESAI, sesi terpisah setelah ini).
 
 ### 19.1 Keputusan desain (final, dikonfirmasi user)
 
@@ -1454,8 +1454,7 @@ sebelum curiga ada bug baru di `inference.py`.
 
 ### 19.4 Belum dikerjakan / di luar scope
 
-- `pipeline/visualize.py` / `06_visualize.py` -- masih belum dibahas sama
-  sekali.
+- `pipeline/visualize.py` / `06_visualize.py` -- SELESAI, lihat §20.
 - Scheduling OS-level (Windows Task Scheduler / cron) buat batch terjadwal
   -- di luar scope kode ini, tanggung jawab operasional user.
 - Partial-skip belum diverifikasi di data asli (lihat 19.3) -- kalau mau
@@ -1592,5 +1591,497 @@ dari grid canonical yang konsisten); NaN handling di `abs_error` &
 GeoJSON `None`-cast (benar); kemungkinan `HORIZON_STEPS=0`/`MIN_WINDOW_SIZE<2`
 bikin crash di rollout (sudah dicegah `assert` di `config.py`, tidak
 reachable dari CLI manapun).
+
+---
+
+## 20. Stage 06: `pipeline/visualize.py` + `scripts/06_visualize.py` (BARU, SELESAI)
+
+**STATUS SINGKAT**: render hasil forecast Stage 05 jadi animasi GIF 6-panel
+peta. Plan mode dipakai, plan DITOLAK DUA KALI sebelum diterima (revisi
+pertama: user minta kembali ditanya pertanyaan klarifikasi yang sempat
+ke-skip krn salah pencet tool; revisi kedua & paling penting: draft awal
+sempat punya 1 panel TEKS info -- user tegas koreksi "3. semuanya dalam
+bentuk map", SEMUA 6 panel WAJIB peta/spatial plot, metadata jadi
+title/caption saja). Diimplementasi + diverifikasi end-to-end pakai CSV
+forecast ASLI yang sudah ada di `forecast_output/` (bukan data sintetis).
+
+### 20.1 Layout final (2x3, SEMUA 6 panel = peta, TIDAK ADA panel teks)
+
+| Baris | Kolom 1 | Kolom 2 | Kolom 3 |
+|---|---|---|---|
+| **1** | **Input @ t0**: peta observasi TBB asli di titik observasi TERAKHIR sebelum forecast mulai (`window_end_time`) | **Prediksi**: peta `y_pred` step berjalan | **Aktual**: peta `y_true` (placeholder-map kalau NaN semua) |
+| **2** | **Kelas Awan**: peta kategorikal dari `y_pred` (`tidak hujan`/`mendung`/`hujan`) | **Risiko Banjir**: peta kategorikal dari `y_pred` SAMA (breakpoint sama, label beda: `aman`/`waspada`/`bahaya`) | **Error Map**: peta `\|y_pred - y_true\|` (placeholder-map kalau NaN semua) |
+
+`fig.suptitle`: model, damping_factor, t0, target_time, step X/18, MAE step
+ini (atau "n/a" kalau tidak ada observasi), ringkasan status (jumlah pixel
+aman/waspada/bahaya). Metadata TIDAK PERNAH jadi panel tersendiri --
+placeholder-map (Aktual/Error saat NaN semua) tetap render frame geografis
+penuh (extent + boundary overlay + teks di tengah), BUKAN axis kosong
+polos, supaya "tetap map" konsisten di semua 6 slot bahkan saat data
+kosong.
+
+### 20.2 Masalah desain: panel "Input @ t0" butuh data yang TIDAK ADA di CSV Stage 05
+
+CSV Stage 05 (`inference.CSV_COLUMNS`) cuma simpan `y_pred`/`y_true`/
+`abs_error` per (pixel, step) -- TIDAK simpan observasi mentah di titik t0
+itu sendiri. Solusi: `t0` per pixel diturunkan dari data yang SUDAH ADA
+(`compute_t0_per_pixel()`: `window_end_time = target_time(step=1) -
+FREQ_MINUTES`, aritmatika sederhana, row-level bukan diasumsikan sama
+semua pixel), lalu file `.nc` yang relevan dibaca ULANG dari
+`data_bandung/` -- **BUKAN implementasi baru**, reuse fungsi Stage 05.
+
+**Refactor pendukung** (`pipeline/inference.py`): logic inti
+`load_actual_values()` (scan `data_dir` utk rentang waktu, baca via
+`load_pixel_grid`, bangun dict `{(pixel_id, timestamp): value}`)
+DIEKSTRAK jadi fungsi public baru `load_raw_values_lookup(data_dir,
+min_time, max_time, freq_minutes=None, n_workers=None) -> dict`.
+`load_actual_values()` sekarang wrapper TIPIS di atasnya (hitung
+`min_time`/`max_time` dari `target_time`, panggil fungsi baru, tambah
+logging `n_found`/`n_possible` sendiri) -- **perilaku TIDAK BERUBAH**,
+diverifikasi regression test manual (`--t0 "2026-05-10 06:00:00"
+--tail-files 30 --workers 1 --model lightgbm"` -> tetap "630/630 baris
+forecast" identik sebelum & sesudah refactor). `pipeline/visualize.py`
+import & reuse fungsi yang SAMA (`load_input_snapshot()` di
+`visualize.py` panggil `load_raw_values_lookup()` dgn rentang waktu beda:
+`window_end_time` per pixel, bukan `target_time`).
+
+### 20.3 Geometri peta: extent & aspect ratio DIHITUNG DARI CONFIG, BUKAN dari CSV
+
+`compute_grid_geometry()` hitung `extent=[lon_min,lon_max,lat_min,lat_max]`
+(padding setengah-sel) dari **`Config.BANDUNG_LAT_MIN/MAX`,
+`LON_MIN/MAX`** (bounding box download tetap) + `Config.PIXEL_GRID_SHAPE`
+-- **BUKAN** dari lat/lon pixel yang HADIR di CSV forecast tertentu.
+Alasan: kalau dihitung dari data yang hadir, extent bisa "menyusut" diam-
+diam kalau kebetulan pixel TEPI di-skip Stage 05 (window pixel itu invalid/
+gap), bikin peta antar-run tidak konsisten padahal domain geografisnya
+sama. Diverifikasi numerik lat/lon pixel asli: `lat_idx=0` -> `-6.800003`
+(utara), `lat_idx=4` -> `-7.000000` (selatan), `lon_idx=0` -> `107.5`
+(barat), `lon_idx=6` -> `107.8` (timur) -- match hampir persis dgn
+`Config.BANDUNG_LAT_MIN/MAX`/`LON_MIN/MAX` (deviasi ~3e-6, floating point).
+
+`pixel_rows_to_grid()` pakai `lat_idx`/`lon_idx` (integer grid index,
+EXACT) buat PENEMPATAN nilai di array -- ORTHOGONAL dari geometri fisik
+(extent, dari poin di atas). `origin="upper"` (default `imshow`) otomatis
+match orientasi "utara di atas" karena `lat_idx=0` (baris 0 array) =
+latitude PALING UTARA (`-6.8`, angka lebih besar/kurang negatif) -- TIDAK
+perlu flip manual.
+
+Aspect ratio: `ax.set_aspect(1/cos(radians(lat_tengah)))` -- koreksi
+equirectangular standar utk area sekecil Bandung, cukup akurat, tidak
+perlu `cartopy`/proyeksi peta penuh.
+
+### 20.4 Overlay batas kecamatan
+
+`load_kecamatan_boundaries()` parse `scripts/geojson/KotaBandung.geojson`
+pakai stdlib `json` (BUKAN geopandas -- hindari dependency berat baru).
+File itu (dipakai HANYA sbg overlay visual, sesuai §19.1 poin 5 -- BUKAN
+sumber data/grid) berisi 30 kecamatan GADM (`MultiPolygon`, `NAME_3`/
+`TYPE_3="Kecamatan"`), rentang `lon 107.546-107.739`/`lat -6.970 s.d.
+-6.837` -- overlap baik dgn extent pixel grid. Cuma ring LUAR tiap polygon
+diambil (abaikan lubang -- cukup utk garis referensi visual). Gagal parse
+/ file tidak ada -> `say_info` + return `[]` (overlay di-skip, BUKAN
+crash -- fitur pelengkap, bukan wajib). **Divalidasi**: path sengaja
+diarahkan ke file tidak ada -> graceful skip terkonfirmasi, tidak ada
+exception.
+
+### 20.5 Klasifikasi Kelas Awan & Risiko Banjir
+
+`classify_tbb_grid(value_grid, thresholds=Config.TBB_RISK_THRESHOLDS)` --
+SATU fungsi generik, breakpoint `(200.0, 270.0)` sesuai keputusan Dhika
+(§9 daftar poin `s` di riwayat sesi): `<200`=code 0, `200-270`=code 1,
+`>270`=code 2. **Diklasifikasi dari `y_pred`** (bukan `y_true`/Input) --
+alasan: ini visualisasi FORECAST, `y_pred` SELALU tersedia sedangkan
+`y_true` bisa NaN utk forecast masa depan genuine. Dipanggil SEKALI per
+step, `code_grid` yang SAMA dipakai render 2 panel (Kelas Awan & Risiko
+Banjir) dgn label/warna beda saja (`render_categorical_map_panel()`
+generik, terima `class_labels`/`colors` sbg parameter).
+
+### 20.6 Warna (skill `dataviz`, lihat `references/palette.md`)
+
+- **Input/Prediksi/Aktual**: sequential blue 13-step dari `palette.md`,
+  **DIBALIK** (reversed) dari orientasi default skill ("terang=dekat
+  nol") -- di domain TBB, nilai RENDAH = puncak awan tinggi/dingin =
+  konveksi kuat = BAHAYA, jadi harus menonjol GELAP (bukan memudar ke
+  surface spt asumsi skill "0=tidak penting" yang tidak berlaku di sini).
+  vmin/vmax **PER STEP** (`compute_value_range()`, dipanggil ULANG di
+  dalam loop render tiap step -- lihat §20.13, REVISI dari desain awal
+  yang GLOBAL lintas 18 step) -- vmax selalu = nilai TBB tertinggi yang
+  benar2 muncul PADA STEP ITU (gabungan Input+Prediksi+Aktual step
+  tsb), diminta Dhika biar tiap frame pakai kontras/dynamic range
+  penuh. Trade-off: warna TIDAK LAGI apple-to-apple lintas step (mis.
+  "biru gelap" step 1 vs step 18 bisa berarti suhu beda) -- 3 panel
+  DALAM 1 frame yang sama tetap comparable satu sama lain.
+- **Error Map**: ramp sintetis 2-stop (`palette.md` cuma kasih 1 hex
+  orange, bukan ramp 13-step spt biru) dari surface terang `#fcfcfb` ke
+  oranye kategorikal-slot-2 `#eb6834`, orientasi NORMAL (0 error=terang,
+  krn 0 memang berarti "tidak ada apa-apa" -- beda semantik dari TBB).
+  vmax juga PER STEP (`compute_mae_range()`, sama alasan/trade-off di atas).
+- **Kelas Awan/Risiko Banjir**: status palette `palette.md`
+  (good=`#0ca30c`/warning=`#fab219`/critical=`#d03b3b`, dokumentasi
+  "fixed -- never themed", sudah pre-validated terpisah dari kategorikal)
+  -- breakpoint SAMA di kedua panel (§20.5) jadi warnanya otomatis
+  konsisten. Legend WAJIB tampil (icon+label) di tiap panel kategorikal --
+  mitigasi kontras sub-3:1 `warning` di light surface (aturan
+  `palette.md`, status color TIDAK BOLEH mengandalkan hue doang).
+- **NaN/pixel hilang**: abu netral `#c8c7c2`, beda jelas dari semua warna
+  data (`cmap.set_bad(...)`, `np.ma.masked_invalid(...)`).
+- Validator `scripts/validate_palette.js` (skill dataviz) **TIDAK
+  dijalankan ke status palette** -- footer validator sendiri bilang
+  "scope: categorical palettes only", dan `palette.md` sudah
+  mendokumentasikan status color sbg set independen yang pre-validated
+  (kontras diberikan langsung di tabel dokumen).
+
+### 20.7 Config tambahan
+
+```python
+PIXEL_GRID_SHAPE = (5, 7)
+TBB_RISK_THRESHOLDS = (200.0, 270.0)
+VISUALIZATION_DIR = os.path.join(PROJECT_ROOT, "visualizations")
+VISUALIZATION_FRAME_DURATION_MS = 800
+KOTA_BANDUNG_GEOJSON = os.path.join(PROJECT_ROOT, "scripts", "geojson", "KotaBandung.geojson")
+```
+
+**Bug kecil ketemu & di-fix SENDIRI (sebelum sempat dijalankan)**: draft
+pertama `KOTA_BANDUNG_GEOJSON` pakai `SCRIPT_DIR` (direktori `config.py`
+sendiri, `scripts/pipeline/`) -- salah, resolve ke
+`scripts/pipeline/geojson/KotaBandung.geojson` yang tidak ada. Fix:
+`PROJECT_ROOT` + komponen path eksplisit `"scripts"`. Diverifikasi
+`os.path.exists(...)` True sebelum dipakai di kode manapun.
+
+### 20.8 Struktur output & idempotensi
+
+`visualizations/{model}_t0{YYYYMMDD_HHMM}_run{YYYYMMDD_HHMM}/frames/step{01-18}.png`
++ `.../animation.gif`. Nama folder = identitas persis file CSV sumber
+(`t0_str`/`run_str` diambil LANGSUNG dari regex nama file, bukan dihitung
+ulang). **SENGAJA idempotent** (run ulang `06_visualize.py` pada CSV yang
+sama -> overwrite folder yang sama, BUKAN duplikat) -- beda dari Stage 05
+yang tiap run SELALU unique (data baru tiap kali). Ini karena render adalah
+fungsi DETERMINISTIK dari CSV sumber yang sudah ada, bukan proses yang
+menghasilkan data baru. Diverifikasi: run 2x pada CSV sama -> `mtime`
+`step01.png` berubah (02:44 -> 02:47), tapi jumlah folder tetap 1 (bukan
+2 folder terpisah).
+
+### 20.9 Trigger & CLI
+
+Standalone, manual/on-demand -- `python 06_visualize.py [--forecast-dir]
+[--csv] [--output-dir] [--frame-duration-ms]`. Pemilihan file forecast:
+`discover_forecast_files()` (regex nama file BARU Stage 05 SAJA, file pola
+lama tanpa token `t0`/`run` diabaikan diam-diam + 1 baris ringkasan
+jumlah) + `prompt_select_forecast_file()` -- **0 hasil**: `ValueError`
+jelas, CLI tangkap & `say_error`, berhenti bersih (bukan traceback). **1
+hasil**: langsung dipakai + `say_info` transparansi (skip prompt). **>1
+hasil**: menu bernomor (terurut `run_ts` DESCENDING, run terbaru di
+atas), `input()` sampai angka valid. `--csv` melewati menu sepenuhnya
+(parse `model`/`t0`/`run` langsung dari nama file via regex yang sama).
+
+### 20.10 Verifikasi (data ASLI `forecast_output/`, BUKAN sintetis)
+
+Semua PASS:
+1. **Discovery & filter pola lama**: 5 CSV pola baru terdeteksi + N file
+   pola lama (tanpa `t0`/`run`) diabaikan dgn 1 baris ringkasan (bukan
+   spam per-file).
+2. **Skenario 0 hasil**: folder kosong -> `ValueError` pesan jelas,
+   terkonfirmasi via `prompt_select_forecast_file()` langsung (unit-level).
+3. **Full end-to-end, y_true TERISI** (`forecast_lightgbm_t020260510_0600_run20260809_0233.csv`,
+   630/630 baris ada observasi asli): 35/35 pixel lengkap (tidak ada yg
+   di-skip), 18 frame + GIF ke-generate (~20 detik), `PIL.Image.open(...).n_frames
+   == 18` terkonfirmasi, ukuran frame 1760x1100px. **Cek visual manual**
+   (dikirim ke user): layout 2x3 benar, boundary kecamatan align rapi di
+   dalam extent pixel grid, colorbar/legend terbaca, orientasi utara-atas
+   benar. Bonus tak terduga: frame step 18 SECARA VISUAL menampilkan
+   PERSIS fenomena "spatial collapse" yang jadi topik investigasi §17 --
+   `y_true` step 18 punya cold-spot tajam di pixel barat (~240-250K) yang
+   TIDAK tertangkap `y_pred` (tetap smooth ~260-270K), match tepat dgn
+   `Error Map` yang menyorot lokasi sama sbg area error terbesar --
+   mengkonfirmasi visualisasi ini bukan cuma "terlihat benar" tapi juga
+   SECARA SUBSTANTIF berguna mendeteksi masalah model yang sudah
+   didokumentasikan.
+4. **Full end-to-end, y_true NaN SEMUA** (`forecast_lightgbm_t020260731_2320_run20260809_0124.csv`,
+   forecast murni ke masa depan genuine): berjalan tanpa error, panel
+   Aktual & Error Map render sbg placeholder-map (frame geografis +
+   boundary + teks "Tidak ada observasi asli..." di tengah, BUKAN axis
+   kosong polos) -- cek visual manual dikonfirmasi sesuai desain §20.1.
+   CLI print info ringkas ("Panel Aktual/Error Map: NaN semua..."), bukan
+   tabel MAE kosong.
+5. **Missing-pixel robustness** (sintetis: 3 pixel di-drop paksa dari
+   dataframe ASLI, termasuk 1 pixel pojok `4_6`): `warn_missing_pixels()`
+   deteksi persis 3 pixel yg hilang, `pixel_rows_to_grid()` taruh `NaN`
+   TEPAT di posisi `(lat_idx,lon_idx)` yg benar (bukan shift/salah
+   posisi) -- render layer sudah teruji tidak crash krn NaN (dibuktikan
+   di 2 full-run di atas yg juga lewat jalur `masked_invalid`).
+6. **Idempotensi**: lihat §20.8 -- terkonfirmasi overwrite, bukan duplikat.
+7. **GeoJSON overlay**: tampil benar di kedua full-run (31 ring, cek
+   visual manual); path sengaja salah -> graceful skip + `say_info`,
+   TIDAK crash (lihat §20.4).
+8. **Regression Stage 05**: `load_actual_values()` (refactor §20.2) masih
+   PASS test manual yang sama dgn sebelum refactor (630/630 baris,
+   `--t0 "2026-05-10 06:00:00" --tail-files 30 --workers 1 --model
+   lightgbm`) -- extract-method TIDAK mengubah perilaku.
+
+**Catatan lingkungan (BUKAN bug kode)**: menjalankan script CLI (banner
+`box-drawing` characters) langsung di beberapa terminal Windows (cp1252
+default) memicu `UnicodeEncodeError` di `ui.terminal_display.hr()`/`banner()`
+-- **workaround**: set `PYTHONIOENCODING=utf-8` sebelum run (mis. `set
+PYTHONIOENCODING=utf-8 && python 06_visualize.py ...` di cmd, atau
+`$env:PYTHONIOENCODING="utf-8"` di PowerShell). Ini pre-existing di semua
+script CLI project ini (01-06 sama-sama pakai `ui.terminal_display`),
+bukan spesifik Stage 06 -- dicatat di sini krn baru ketauan pas verifikasi
+sesi ini.
+
+### 20.11 Mask pixel di luar batas administratif Kota Bandung (revisi, sesi lanjutan)
+
+**Masalah**: Dhika lihat hasil render & sadar ~20 dari 35 pixel (seluruh
+cincin tepi grid: `lat_idx∈{0,4}` ATAU `lon_idx∈{0,6}`) SECARA VISUAL
+berada di luar wilayah Kota Bandung -- masuk akal, karena bounding box
+download (`Config.BANDUNG_LAT/LON_MIN/MAX`, dari Stage 01) sengaja lebih
+lebar dari batas administratif kota (lon `107.475-107.825` grid vs
+`107.546-107.739` kota asli; lat `-7.025 s.d -6.775` grid vs
+`-6.970 s.d -6.837` kota asli -- kota cuma ~55% dari lebar/tinggi grid).
+Diminta: pixel di luar area kota JANGAN dipakai di visualisasi -- TAPI
+TIDAK BOLEH re-run `01_download_data.py` (tidak mau ubah bounding box
+download/dataset asli).
+
+**Keputusan**: mask murni di LAYER VISUALISASI Stage 06 saja (BUKAN
+mengubah `data_bandung/`, dataset training, atau CSV forecast Stage 05
+manapun) -- pixel yang di-mask tetap ADA di CSV/data, cuma tidak
+digambar (jadi abu-abu) di GIF.
+
+**Cara tes "pixel termasuk wilayah kota atau tidak"**: dicoba 2
+pendekatan, dibandingkan hasilnya:
+1. **Titik tengah pixel SAJA** (`Path.contains_point` pada 1 titik per
+   pixel) -- TERLALU AGRESIF, cuma **6/35 pixel** lolos. Sebabnya:
+   spacing grid ~0.05 derajat (~5,5 km) sementara Kota Bandung sempit &
+   bentuknya tidak beraturan, jadi banyak pixel yang SEBAGIAN BESAR
+   cell-nya beririsan dgn kota tapi titik tengahnya kebetulan jatuh di
+   luar polygon (gap antar kecamatan/tepi) -- keliru exclude.
+2. **Cell-overlap** (sampling grid `7x7=49` titik di dalam tiap cell
+   pixel, `contains_points`, pixel lolos kalau MINIMAL 1 titik sample
+   masuk polygon manapun) -- **13/35 pixel** lolos, HASIL DIPAKAI. Jauh
+   lebih match dgn observasi visual Dhika: seluruh cincin tepi grid
+   (`lat_idx=0`, `lat_idx=4`, `lon_idx=0`, `lon_idx=6`) KONSISTEN
+   ter-exclude, sisa 13 pixel bentuknya menyerupai siluet kota (pola
+   "plus/salib" kasar) yang align rapi dgn overlay batas kecamatan.
+
+**Implementasi** (`pipeline/visualize.py`):
+- `compute_boundary_mask(boundaries, grid_shape=None, n_samples=7)` --
+  return grid boolean `(5,7)`, True = cell pixel beririsan dgn UNION
+  seluruh polygon kecamatan (pakai `matplotlib.path.Path`, BUKAN
+  dependency baru -- matplotlib sudah ada). `boundaries` kosong (gagal
+  load geojson) -> return all-True (fail-OPEN, bukan fail-closed --
+  fitur pelengkap, kalau geojson tidak ada JANGAN sampai semua pixel
+  ke-mask tanpa sengaja).
+- `apply_boundary_mask(grid, boundary_mask)` -- set NaN di posisi
+  `False`, REUSE jalur render NaN yang SUDAH ADA (`masked_invalid` +
+  `cmap.set_bad(NODATA_COLOR)`) -- TIDAK ada kode render baru, pixel
+  ter-mask otomatis jadi abu-abu sama seperti pixel yang di-skip Stage
+  05 krn gap.
+- `boundary_mask_to_pixel_ids(boundary_mask)` -- konversi ke set
+  `pixel_id` string, dipakai filter `detail_df`/`input_lookup` SEBELUM
+  `compute_value_range()`/`compute_mae_range()` -- supaya skala warna
+  GLOBAL (vmin/vmax) tidak lagi kebawa nilai pixel yang toh di-mask abu-
+  abu (rentang jadi lebih fokus/relevan drpd sebelumnya).
+- Diterapkan ke SEMUA 6 grid (`grid_input`, `grid_pred`, `grid_true`,
+  `grid_mae`, & `code_grid` otomatis ikut ter-mask krn diturunkan dari
+  `grid_pred` yang sudah NaN -- `classify_tbb_grid` propagate NaN).
+- **Default NONAKTIF** (`mask_outside_bandung=False` di
+  `render_all_frames()`/`visualize_forecast()`) -- awalnya sempat dibuat
+  default AKTIF & dicoba (lihat "Divalidasi" di bawah, hasil 13/35 pixel
+  terbukti benar & sesuai observasi Dhika), TAPI setelah lihat hasilnya
+  Dhika memutuskan **"kek sebelumnya aja deh"** (kembali ke tampilan 35
+  pixel penuh sbg default). Fitur TETAP ADA sbg opt-in via flag CLI
+  `--mask-outside-bandung` (store_true) di `06_visualize.py` kalau nanti
+  dibutuhkan lagi -- kode tidak dihapus, cuma default-nya dibalik.
+
+**Divalidasi** (data ASLI, CSV forecast yang sudah ada):
+- Full end-to-end render dgn `--mask-outside-bandung`: log konfirmasi
+  "13/35 pixel dipertahankan", cek visual manual -- cincin tepi grid
+  abu-abu penuh, 13 pixel tengah tetap berwarna & align dgn overlay
+  batas kecamatan, ringkasan status suptitle ikut menyesuaikan (mis.
+  "13 bahaya" bukan "35 bahaya" -- otomatis benar krn `code_grid` sudah
+  ter-mask sebelum dihitung).
+- Default (tanpa flag): regression-test, hasil identik dgn perilaku
+  SEBELUM fitur mask ditambahkan (35 pixel penuh, tanpa log info mask) --
+  ini yang jadi konfigurasi final.
+
+### 20.12 Skala warna PER STEP (revisi, sesi lanjutan)
+
+Diminta Dhika: warna paling pekat/tinggi di tiap frame harus
+merepresentasikan nilai TERTINGGI PADA STEP ITU SENDIRI (TBB maupun
+MAE), BUKAN nilai tertinggi lintas seluruh 18 step (desain awal §20.6).
+
+**Perubahan**: `compute_value_range()`/`compute_mae_range()` (SAMA
+persis logikanya, cuma parameter pertama diganti nama `detail_df` ->
+`step_df` biar jelas maksudnya) sekarang dipanggil DI DALAM loop
+`render_all_frames()` per step (pakai `step_df`, bukan `detail_df`
+penuh), BUKAN sekali di luar loop sebelum render frame manapun spt
+sebelumnya. Tidak ada perubahan SIGNATURE fungsi ataupun formula --
+cuma titik pemanggilannya dipindah dari "sekali, global" jadi "berulang,
+per step".
+
+**Konsekuensi visual**: `grid_input` (Input @ t0, TIDAK berubah antar
+step) tetap ikut masuk perhitungan `value_range` tiap step bareng
+`grid_pred`/`grid_true` step itu -- jadi 3 panel TBB DALAM 1 frame yang
+sama tetap saling sebanding, tapi rentang warnanya BEDA-BEDA antar
+frame (step 1 dites: TBB 278-300K; step 18: TBB ~245-297K; MAE step 1:
+0-4,5K; MAE step 18: 0-52K). Ini SENGAJA (diminta) -- kontras tiap
+frame individual jadi maksimal, tapi warna TIDAK BISA lagi dibandingkan
+lintas step cuma dari mata (harus liat suptitle/colorbar tiap frame).
+
+**Divalidasi**: full re-render 2 CSV asli (skenario y_true terisi &
+y_true NaN semua) -- keduanya jalan tanpa error, colorbar step 1 vs
+step 18 dikonfirmasi visual BEDA rentang (bukti per-step benar-benar
+aktif, bukan cuma ganti kode tanpa efek). `boundary_mask` (§20.11, kalau
+`--mask-outside-bandung` dipakai) tetap terapply konsisten ke
+perhitungan range per-step (filter pixel_id sebelum hitung min/max,
+logic tidak berubah dari desain sebelumnya, cuma dipanggil lebih sering).
+
+### 20.13 Fix arah threshold Kelas Awan/Risiko Banjir + polish tampilan (revisi, sesi lanjutan)
+
+**Bug ketemu**: Dhika lihat panel Kelas Awan & Risiko Banjir SELALU merah
+("bahaya"/"hujan") di semua step, semua CSV forecast yang ada. Dicek:
+`y_pred` di SEMUA CSV forecast asli konsisten **276-300K** (kondisi
+cerah/hangat, wajar buat Bandung) -- dgn breakpoint `(200,270)` versi
+awal (`<200=aman`, `>270=bahaya`), nilai 276-300K SELALU masuk `>270`
+jadi SELALU "bahaya". **Root cause: arah threshold TERBALIK** dari
+konvensi fisik cloud-top brightness temperature -- TBB RENDAH = puncak
+awan tinggi/dingin = konveksi kuat = BAHAYA, TBB TINGGI = langit
+cerah/dekat suhu permukaan = AMAN. Versi awal malah nge-assign `code 0
+(aman)` ke `value < lo` dan `code 2 (bahaya)` ke `value > hi` -- KEBALIK,
+walau docstring `classify_tbb_grid()` sendiri SUDAH benar nyebut "TBB
+rendah = ... = BAHAYA" (inkonsistensi comment vs kode, luput sebelumnya
+krn belum ada CSV forecast asli yg diperiksa distribusi nilainya).
+
+**Dikonfirmasi ke Dhika sebelum diubah** (bukan langsung diasumsikan) --
+disetujui, arah dibalik. **Fix** (`classify_tbb_grid()`,
+`pipeline/visualize.py`): breakpoint `Config.TBB_RISK_THRESHOLDS=(200,270)`
+TIDAK BERUBAH, tapi assignment code dibalik --
+`value < lo -> code 2 (bahaya/hujan)`, `lo<=value<=hi -> code 1
+(waspada/mendung)`, `value > hi -> code 0 (aman/tidak hujan)`. Label &
+warna per code (`render_categorical_map_panel()` call di
+`build_step_figure()`) TIDAK berubah -- cuma pemetaan NILAI -> CODE yang
+dibalik, jadi warna hijau/kuning/merah tetap konsisten artinya
+aman/waspada/bahaya.
+
+**Divalidasi**: re-render CSV forecast asli (y_pred 276-300K) -> Kelas
+Awan & Risiko Banjir sekarang HIJAU penuh (35 aman, 0 waspada, 0
+bahaya) -- sesuai ekspektasi kondisi cerah.
+
+**Polish tampilan lain, diminta bareng** (semua di `build_step_figure()`/
+`render_map_panel()`):
+- **Judul panel disederhanakan**, hapus teks dalam kurung: "Input
+  (Observasi @ t0)" -> "Input", "Prediksi (step N)" -> "Prediksi",
+  "Aktual (Observasi)" -> "Aktual", "Kelas Awan (dari prediksi)" ->
+  "Kelas Awan", "Risiko Banjir (dari prediksi)" -> "Risiko Banjir",
+  "Error Map (\|prediksi - aktual\|)" -> "Error Map".
+- **Step di suptitle zero-padded 2 digit**: `step 1/18` -> `step
+  01/18` (`f"{step:02d}/{horizon_steps:02d}"`) -- konsisten dgn nama
+  file frame (`step01.png`..`step18.png`) yg sudah begitu dari awal.
+- **Semua angka desimal di visualisasi jadi 2 angka di belakang koma**:
+  `damping=1.0` -> `damping=1.00` (suptitle), colorbar tick TBB & MAE
+  (`FormatStrFormatter("%.2f")` di `cbar.ax.yaxis`, sebelumnya format
+  default matplotlib yg jumlah desimalnya tidak konsisten antar tick).
+  `MAE step ini` sudah `.2f` dari awal (§20.1), tidak berubah.
+
+**Divalidasi**: full re-render, cek visual manual -- judul panel bersih,
+`step 01/18`, `damping=1.00`, colorbar tampil `300.00`/`295.00`/dst
+(2 desimal konsisten).
+
+### 20.14 Audit ulang kode Stage 06 (diminta Dhika, setelah semua revisi di atas)
+
+Review baris-per-baris seluruh `pipeline/visualize.py` + `06_visualize.py`
+pasca semua revisi (mask boundary, skala per-step, fix threshold, polish
+tampilan). **1 bug nyata ketemu, sudah diperbaiki & diverifikasi**:
+
+**BUG: CSV forecast 0 baris (skema kolom valid, tapi kosong -- bisa
+kejadian kalau Stage 05 gagal forecast SEMUA pixel, 0/35) bikin
+`IndexError` mentah**, bukan pesan error yang jelas. Dibuktikan (BUKAN
+diduga) pakai CSV dummy 0-baris asli: crash di
+`damping_factor = float(detail_df["damping_factor"].iloc[0])`
+(`visualize_forecast()`) -- `IndexError: single positional indexer is
+out-of-bounds`. `IndexError` TIDAK ketangkep `except (FileNotFoundError,
+ValueError)` di `06_visualize.py::main()`, jadi user lihat traceback
+Python penuh, bukan `say_error` yang rapi. Kalau guard ini tidak ada,
+skenario yang sama juga akan crash lebih jauh di `render_all_frames()`
+(`steps[0]`, list kosong) atau `assemble_gif()` (`frames[0]`).
+
+**Fix**: `load_forecast_csv()` sekarang validasi `if df.empty: raise
+ValueError(...)` SETELAH cek kolom, SEBELUM return -- pesan jelas
+("kemungkinan Stage 05 gagal forecast semua pixel"), ketangkep normal
+oleh `except ValueError` yang sudah ada di CLI, TIDAK perlu ubah
+`06_visualize.py` sama sekali.
+
+**Divalidasi**: CSV dummy 0-baris (skema sama persis dgn CSV asli, dibuat
+dari CSV forecast asli yg di-slice `iloc[0:0]`) -> `say_error` bersih
+("CSV forecast ... kosong (0 baris) -- kemungkinan Stage 05 gagal
+forecast semua pixel (0/35)..."), TIDAK ada traceback. Regression test
+CSV normal (630 baris) -> tetap render 18 frame spt biasa, tidak ada
+perubahan perilaku.
+
+**Area lain yang diperiksa TIDAK ketemu bug** (diverifikasi logikanya,
+bukan cuma dibaca sekilas): konsistensi arah `boundary_mask` (True=
+dipertahankan) di `compute_boundary_mask()`/`apply_boundary_mask()`/
+`boundary_mask_to_pixel_ids()` -- terpakai seragam di semua caller;
+urutan masking SEBELUM `classify_tbb_grid()` dipanggil di
+`build_step_figure()` (kalau kebalik, `code_grid`/status count bisa
+masukin pixel di luar boundary); konsistensi antara `compute_mae_range()`
+return `None` dan `grid_mae` all-NaN (dua-duanya pakai filter
+`inside_ids` yang sama, jadi selalu align, placeholder tidak pernah
+"nyasar" nampilin data kosong tanpa pesan); index alignment
+`discover_forecast_files()` (`reset_index(drop=True)`) vs
+`prompt_select_forecast_file()` (`iterrows()`/`iloc[]`) -- konsisten,
+tidak ada off-by-one; potensi `vmin==vmax` di `imshow` (nilai seragam
+1 step) -- dicek aman, matplotlib tidak crash, cuma render warna rata.
+
+**Ronde audit KEDUA** (diminta Dhika lagi, "coba cek lagi baik-baik" --
+lebih ketat, termasuk cross-check `config.py`/`inference.py`, bukan cuma
+`visualize.py`): ketemu 2 hal tambahan, KEDUANYA bukan bug fungsional:
+1. **Drift dokumentasi**: komentar `Config.VISUALIZATION_FRAME_DURATION_MS`
+   di `config.py` bilang "~600ms/frame -> total ~10.8s", tapi nilai
+   aktualnya `800`. CLAUDE.md §20.7 & help text `--frame-duration-ms` di
+   `06_visualize.py` juga masih nyebut `600`. **Dikonfirmasi lewat GIF
+   asli** (`im.info.get('duration')` -> `800`, bukan `600`) bahwa `800`
+   itu nilai yang BENAR-BENAR terpakai -- comment/dokumentasi yang basi,
+   BUKAN kode yang salah. Fix: comment/CLAUDE.md/help text disamakan ke
+   `800`/`~14.4s` (nilai KODE tidak diubah, cuma teks penjelasnya).
+2. **False alarm sempat muncul**: satu pengecekan awal sempat baca
+   `Config.VISUALIZATION_FRAME_DURATION_MS` sbg `800` tapi GIF yang baru
+   di-generate menunjukkan `600` -- kelihatan kayak inkonsistensi
+   runtime. Ditelusuri: **`__pycache__` basi** (`scripts/pipeline/__pycache__/`
+   dkk), BUKAN bug logika. Setelah `__pycache__` dibersihkan total &
+   di-generate ulang, `Config`, kode, dan GIF SEMUA konsisten `800`.
+   Tidak ada perubahan kode dari temuan ini -- cuma pembersihan cache
+   & verifikasi ulang. `.gitignore` pattern `**pycache**/` (bukan
+   `__pycache__/` konvensional) sempat dicurigai jadi biang keladi cache
+   basi ini, tapi dites via `git check-ignore` -- TERBUKTI tetap match &
+   ignore `__pycache__/` dgn benar (glob `*` ganda setara `*` tunggal),
+   jadi BUKAN penyebab & TIDAK diubah.
+
+Semua fix di §20.14 (bug empty-CSV) dan revisi dokumentasi di atas
+di-regression-test ULANG dari `__pycache__` bersih setelah ronde audit
+kedua ini -- hasil konsisten (empty-CSV -> error bersih, normal path +
+`--mask-outside-bandung` -> 13/35 pixel, threshold/per-step/2-desimal
+semua masih benar).
+
+### 20.15 Belum dikerjakan / di luar scope sesi ini
+
+- Scheduling OS-level buat auto-render tiap Stage 05 selesai -- di luar
+  scope, tanggung jawab operasional user (sama seperti §19.4).
+- Kuantisasi warna GIF (256 warna palette-based, bawaan format GIF) bisa
+  menyebabkan banding halus di heatmap kontinu -- diterima krn ini tool
+  diagnostic internal, bukan output publikasi/presentasi resmi. Kalau
+  nanti butuh kualitas lebih tinggi, pertimbangkan output MP4/APNG
+  (dependency baru, belum dibahas).
+- Workaround `PYTHONIOENCODING=utf-8` (lihat catatan di 20.10) belum
+  di-otomatisasi di level kode (mis. `sys.stdout.reconfigure(encoding=...)`
+  di entrypoint) -- kalau operasional Dhika sering ketemu error ini,
+  pertimbangkan fix terpusat di `ui/terminal_display.py`, belum dilakukan
+  sesi ini krn di luar scope Stage 06 murni.
+- `compute_boundary_mask()` (§20.11) pakai APROKSIMASI sampling
+  (`n_samples=7` titik per cell), BUKAN true polygon-rectangle
+  intersection -- cukup akurat utk tujuan visual (grid ~0,05° vs sampling
+  spacing ~0,008°), tapi kalau `PIXEL_GRID_SHAPE` diperbesar drastis
+  (cell jadi jauh lebih kecil) atau butuh presisi geometri eksak,
+  pertimbangkan `n_samples` lebih besar atau intersection library
+  (shapely, dependency baru) -- belum dibutuhkan sejauh grid 5x7 ini.
 
 ---

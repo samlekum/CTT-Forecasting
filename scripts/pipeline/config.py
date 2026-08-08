@@ -207,6 +207,43 @@ class Config:
     # overwrite "latest") supaya bisa diaudit/dibandingkan lintas run.
     INFERENCE_DIR = os.path.join(PROJECT_ROOT, "forecast_output")
 
+    # ------------------------------------------------------------------
+    # Konfigurasi khusus VISUALISASI (Tahap 7 / 06_visualize.py). Render
+    # CSV forecast Tahap 6 jadi animasi GIF 6-panel (semua panel = peta
+    # spasial pakai lat/lon asli) per step. Lihat pipeline/visualize.py.
+    # ------------------------------------------------------------------
+
+    # Dimensi grid pixel Bandung (lat_idx 0-4, lon_idx 0-6) -- FIXED,
+    # sesuai subset area download (lihat CLAUDE.md §12 "Definisi pixel":
+    # grid ~5x7=35 pixel). Dipakai visualize.py buat reshape long-format
+    # CSV -> array 2D siap imshow. TIDAK diturunkan otomatis dari data CSV
+    # (max lat_idx/lon_idx yang HADIR) karena Stage 05 bisa skip pixel
+    # tepi grid kalau gagal gap-check -- kalau diturunkan dari data, grid
+    # bisa "menyusut" diam-diam dan salah tafsir sbg ukuran domain berubah.
+    PIXEL_GRID_SHAPE = (5, 7)
+
+    # Threshold TBB (Kelvin) buat klasifikasi 3 kelas risk_banjir/kelas_awan
+    # (SAMA PERSIS dipakai kedua panel, cuma label beda -- lihat
+    # visualize.classify_tbb_grid()). TBB rendah = puncak awan
+    # tinggi/dingin = konveksi kuat = risiko hujan lebat/banjir.
+    TBB_RISK_THRESHOLDS = (200.0, 270.0)
+
+    # Direktori output visualisasi (Tahap 7). Sudah ada di .gitignore.
+    VISUALIZATION_DIR = os.path.join(PROJECT_ROOT, "visualizations")
+
+    # Durasi tiap frame GIF (ms). 800ms/frame -> total ~14.4s utk 18
+    # step, cukup lambat dibaca tapi tidak terlalu lama nunggu 1 putaran.
+    VISUALIZATION_FRAME_DURATION_MS = 800
+
+    # Path GeoJSON batas kecamatan Kota Bandung, dipakai sbg overlay
+    # opsional di tiap panel peta (garis tipis, murni referensi visual --
+    # BUKAN dipakai buat join/agregasi data apapun, sekadar konteks
+    # geografis). Sama CRS dgn pixel grid (lat/lon derajat WGS84 polos),
+    # jadi align langsung tanpa transformasi. Kalau file tidak
+    # ada/gagal di-parse, overlay di-skip diam-diam (fitur pelengkap,
+    # bukan wajib) -- lihat visualize.load_kecamatan_boundaries().
+    KOTA_BANDUNG_GEOJSON = os.path.join(PROJECT_ROOT, "scripts", "geojson", "KotaBandung.geojson")
+
     # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
     # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
     # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run

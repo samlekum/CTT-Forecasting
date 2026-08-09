@@ -109,7 +109,11 @@ def main():
     hr()
 
     os.makedirs(sweep_models_dir, exist_ok=True)
-    os.makedirs(Config.EXPANDING_EVAL_DIR, exist_ok=True)
+    # Output eval KHUSUS ke Config.NOISE_STD_SWEEP_DIR (evaluation/sweep_noise_std/)
+    # -- TERPISAH dari Config.EXPANDING_EVAL_DIR (output RESMI Tahap 04),
+    # supaya evaluation/ nggak kecampur belasan file per-nilai. TANPA
+    # retensi/folder-per-run -- ditimpa tiap sweep dijalankan ulang.
+    os.makedirs(Config.NOISE_STD_SWEEP_DIR, exist_ok=True)
     all_summaries = []
     all_train_summaries = []
 
@@ -150,8 +154,8 @@ def main():
         all_summaries.append(summary_df)
 
         # Simpan detail+summary per-nilai, suffix sama pola sama sweep_damping.py.
-        detail_path = os.path.join(Config.EXPANDING_EVAL_DIR, f"recursive_evaluation{suffix}.csv")
-        summary_path = os.path.join(Config.EXPANDING_EVAL_DIR, f"recursive_mae_summary{suffix}.csv")
+        detail_path = os.path.join(Config.NOISE_STD_SWEEP_DIR, f"recursive_evaluation{suffix}.csv")
+        summary_path = os.path.join(Config.NOISE_STD_SWEEP_DIR, f"recursive_mae_summary{suffix}.csv")
         detail_df.to_csv(detail_path, index=False)
         summary_df.drop(columns=["noise_std"]).to_csv(summary_path, index=False)
         say_ok(f"noise_std={noise_std}: detail & summary tersimpan (suffix {suffix}).")
@@ -161,7 +165,7 @@ def main():
         return
 
     combined = pd.concat(all_summaries, ignore_index=True)
-    combined_path = os.path.join(Config.EXPANDING_EVAL_DIR, "noise_std_sweep_comparison.csv")
+    combined_path = os.path.join(Config.NOISE_STD_SWEEP_DIR, "noise_std_sweep_comparison.csv")
     combined.to_csv(combined_path, index=False)
 
     combined_train = pd.concat(all_train_summaries, ignore_index=True)
@@ -183,7 +187,7 @@ def main():
 
     hr()
     say_ok(f"Model per nilai sweep tersimpan di: {sweep_models_dir} (TIDAK menimpa model produksi)")
-    say_ok(f"Detail & summary per nilai: {Config.EXPANDING_EVAL_DIR} (suffix _noiseXXX)")
+    say_ok(f"Detail & summary per nilai: {Config.NOISE_STD_SWEEP_DIR} (suffix _noiseXXX)")
     say_ok(f"Perbandingan gabungan (semua nilai, semua step): {combined_path}")
     say_ok(f"Ringkasan training (waktu/MAE flat) per nilai: {combined_train_path}")
     say_info(

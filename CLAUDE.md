@@ -2388,7 +2388,40 @@ observasi asli, bukan seragam) -- keduanya BELUM diimplementasi, cuma
 didiskusikan sbg opsi.
 
 Artifact sweep (model per nilai + CSV eval per nilai) TETAP ada di disk
-(`models_noise_sweep/`, `evaluation/*_noiseXXX.csv`, keduanya gitignored)
-buat referensi/audit ulang kalau dibutuhkan -- TIDAK dihapus.
+(`models_noise_sweep/`, `evaluation/sweep_noise_std/`, keduanya gitignored)
+buat referensi/audit ulang kalau dibutuhkan -- TIDAK dihapus. (Path eval
+direvisi §22.4 di bawah -- awalnya langsung di `evaluation/`, sekarang di
+subfolder.)
+
+### 22.4 Pisahkan output sweep dari `evaluation/` (revisi, sesi lanjutan)
+
+Diminta Dhika: `evaluation/` kecampur -- output RESMI Stage 04
+(`recursive_evaluation.csv`/`recursive_mae_summary.csv`) numpuk bareng
+belasan file per-faktor/per-nilai dari `sweep_damping.py`/
+`sweep_noise_std.py` (9 file `_damp0X0`, 5 nilai `_noiseXXX`, masing-
+masing 2 file + 1 file comparison), susah dibedain mana yang "official".
+
+**Fix**: 2 subfolder baru, `Config.DAMPING_SWEEP_DIR`
+(`evaluation/sweep_damping/`) & `Config.NOISE_STD_SWEEP_DIR`
+(`evaluation/sweep_noise_std/`) -- SEMUA output kedua sweep tool itu
+(termasuk `damping_factor=1.0`, yang di versi LAMA nulis ke nama file
+TANPA suffix = sama persis nama file Stage 04, jadi berisiko ketimpa/
+ketimpa balik) sekarang selalu masuk subfolder-nya masing-masing dgn
+suffix konsisten (`_dampXX`/`_noiseXXX`, termasuk `_damp100`). `evaluation/`
+level atas SEKARANG CUMA berisi 2 file resmi Stage 04 -- tidak pernah
+disentuh sweep tool manapun lagi.
+
+**SENGAJA TANPA retensi/folder-per-run** (beda dari `forecast_output/`/
+`visualizations/`) -- kedua subfolder DITIMPA tiap sweep dijalankan ulang,
+sesuai permintaan eksplisit ("gausah bikin retensinya, rewrite aja, biar
+ga terlalu banyak folder").
+
+`generate_summary_report.py::_print_sweep_summary()` diupdate ikut baca
+dari lokasi baru. File-file sweep lama yang sudah ada di disk (dari sesi
+sebelumnya) DIPINDAH manual ke subfolder baru masing-masing (bukan
+dihapus) -- divalidasi re-run `generate_summary_report.py` masih baca
+angka yang SAMA persis dari lokasi baru (section noise_std & damping
+sweep di terminal, keduanya nunjukkin "Sumber: .../sweep_noise_std/..."
+/ ".../sweep_damping/..." dgn benar).
 
 ---

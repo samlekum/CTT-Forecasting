@@ -90,7 +90,11 @@ def main():
     hr()
 
     # --- Loop tiap damping_factor, reuse cache+model yang sudah di-load ---
-    os.makedirs(Config.EXPANDING_EVAL_DIR, exist_ok=True)
+    # Output KHUSUS ke Config.DAMPING_SWEEP_DIR (evaluation/sweep_damping/)
+    # -- TERPISAH dari Config.EXPANDING_EVAL_DIR (output RESMI Tahap 04),
+    # supaya evaluation/ nggak kecampur belasan file per-faktor. TANPA
+    # retensi/folder-per-run -- ditimpa tiap sweep dijalankan ulang.
+    os.makedirs(Config.DAMPING_SWEEP_DIR, exist_ok=True)
     all_summaries = []
 
     for factor in make_progress_bar(factors, desc="Sweep damping", unit="faktor"):
@@ -104,18 +108,18 @@ def main():
         summary_df.insert(0, "damping_factor", factor)
         all_summaries.append(summary_df)
 
-        # Simpan detail+summary per-faktor, suffix sama seperti 04_recursive_evaluate.py
-        detail_path = Config.RECURSIVE_EVAL_DETAIL_FILE
-        summary_path = Config.RECURSIVE_EVAL_SUMMARY_FILE
-        if factor < 1.0:
-            suffix = f"_damp{factor:.2f}".replace(".", "")
-            detail_path = detail_path.replace(".csv", f"{suffix}.csv")
-            summary_path = summary_path.replace(".csv", f"{suffix}.csv")
+        # Simpan detail+summary per-faktor (suffix SELALU dipakai, termasuk
+        # utk factor=1.0 -- beda dari versi lama yang nulis factor=1.0 ke
+        # nama file TANPA suffix, karena sekarang sudah di folder terpisah
+        # jadi tidak ada lagi risiko ketimpa file resmi Tahap 04).
+        suffix = f"_damp{factor:.2f}".replace(".", "")
+        detail_path = os.path.join(Config.DAMPING_SWEEP_DIR, f"recursive_evaluation{suffix}.csv")
+        summary_path = os.path.join(Config.DAMPING_SWEEP_DIR, f"recursive_mae_summary{suffix}.csv")
         detail_df.to_csv(detail_path, index=False)
         summary_df.drop(columns=["damping_factor"]).to_csv(summary_path, index=False)
 
     combined = pd.concat(all_summaries, ignore_index=True)
-    combined_path = os.path.join(Config.EXPANDING_EVAL_DIR, "damping_sweep_comparison.csv")
+    combined_path = os.path.join(Config.DAMPING_SWEEP_DIR, "damping_sweep_comparison.csv")
     combined.to_csv(combined_path, index=False)
 
     gap()
@@ -132,7 +136,7 @@ def main():
         print(sub[["damping_factor", "mae", "rmse", "spatial_collapse_ratio", "spatial_correlation"]].to_string(index=False))
 
     hr()
-    say_ok(f"Detail & summary per faktor disimpan ke: {Config.EXPANDING_EVAL_DIR} (suffix _dampXX)")
+    say_ok(f"Detail & summary per faktor disimpan ke: {Config.DAMPING_SWEEP_DIR} (suffix _dampXX)")
     say_ok(f"Perbandingan gabungan (semua faktor, semua step): {combined_path}")
     say_info(
         "Cara baca: cari damping_factor di mana spatial_collapse_ratio sudah "

@@ -421,21 +421,10 @@ def _mae_chain(eval_df, model_name, steps):
     return " -> ".join(parts)
 
 
-def _load_sweep_summary(filename):
-    """Load CSV hasil sweep_damping.py / sweep_noise_std.py kalau ADA --
-    keduanya tool TERPISAH (bukan bagian alur 02-05 utama), jadi wajar
-    kalau belum pernah dijalankan -- return None (bukan error), caller
-    tampilkan pesan "belum pernah di-sweep"."""
-    path = os.path.join(Config.EXPANDING_EVAL_DIR, filename)
+def _print_sweep_summary(sweep_dir, filename, sweep_col, label):
+    path = os.path.join(sweep_dir, filename)
     if not os.path.exists(path):
-        return None
-    return pd.read_csv(path)
-
-
-def _print_sweep_summary(filename, sweep_col, label):
-    path = os.path.join(Config.EXPANDING_EVAL_DIR, filename)
-    if not os.path.exists(path):
-        print(f"{label} sweep: belum pernah dijalankan ({filename} tidak ditemukan di {Config.EXPANDING_EVAL_DIR}).")
+        print(f"{label} sweep: belum pernah dijalankan ({filename} tidak ditemukan di {sweep_dir}).")
         return
     df = pd.read_csv(path)
     last_step = df["step"].max()
@@ -514,9 +503,9 @@ def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
     print("\n" + "-" * 60)
     print("EKSPERIMEN TUNING (kalau pernah di-sweep)")
     print("-" * 60)
-    _print_sweep_summary("noise_std_sweep_comparison.csv", "noise_std", "noise_std")
+    _print_sweep_summary(Config.NOISE_STD_SWEEP_DIR, "noise_std_sweep_comparison.csv", "noise_std", "noise_std")
     print()
-    _print_sweep_summary("damping_sweep_comparison.csv", "damping_factor", "damping_factor")
+    _print_sweep_summary(Config.DAMPING_SWEEP_DIR, "damping_sweep_comparison.csv", "damping_factor", "damping_factor")
 
     print("\n" + "-" * 60)
     print("CONTOH HASIL FORECAST (Stage 05)")

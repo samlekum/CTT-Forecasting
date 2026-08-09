@@ -158,6 +158,16 @@ class Config:
     RECURSIVE_EVAL_DETAIL_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_evaluation.csv")
     RECURSIVE_EVAL_SUMMARY_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_mae_summary.csv")
 
+    # Subfolder KHUSUS output scripts/tools/sweep_damping.py &
+    # sweep_noise_std.py -- dipisah dari EXPANDING_EVAL_DIR (yang cuma buat
+    # output RESMI 04_recursive_evaluate.py) supaya evaluation/ nggak
+    # kecampur belasan file per-faktor/per-nilai sweep, gampang dibedain
+    # mana hasil Stage 04 "official" vs mana hasil eksperimen tuning.
+    # BUKAN folder-per-run (beda dari forecast_output/visualizations) --
+    # sengaja DITIMPA tiap sweep dijalankan ulang, TANPA retensi.
+    DAMPING_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_damping")
+    NOISE_STD_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_noise_std")
+
     # Direktori output model hasil training (Tahap 3) & ringkasan metrik.
     # Dipakai model_training.py / 03_train_models.py. Path model per-model:
     # {EXPANDING_MODELS_DIR}/{model_name}.joblib. Ringkasan metrik gabungan:

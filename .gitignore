@@ -39,6 +39,7 @@ catboost_info/
 
 # Models
 models/
+models_noise_sweep/
 
 # Log
 *log

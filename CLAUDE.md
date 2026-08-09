@@ -2217,3 +2217,158 @@ ini" juga.
    fitur/model -- murni lokasi file output yang berubah.
 
 ---
+
+## 22. Bug Fixes Tambahan + Tool Baru (sesi audit & presentasi)
+
+### 22.1 Bug fixes hasil audit menyeluruh (code review seluruh codebase)
+
+Diminta Dhika: audit seluruh `scripts/` cari kemungkinan bug (bukan dari
+laporan spesifik). 4 agent paralel per area (feature engineering/dataset,
+training/recursive-eval, inference/visualisasi, infra FTP/NetCDF/
+notifier) + verifikasi manual tiap temuan. 2 diperbaiki (diminta eksplisit
+oleh Dhika, `01_download_data.py` SENGAJA TIDAK disentuh):
+
+1. **`dataset_builder.py::build_dataset()`** -- `--max-files 0` (atau
+   nilai yang menghasilkan slice kosong) dulu lolos guard "tidak ada
+   file" (guard cuma cek SEBELUM slice), lalu crash `IndexError` mentah
+   di `build_uniform_timeline()` (`entries[0][0]` pada list kosong).
+   Fix: `ValueError` eksplisit segera setelah slice kalau hasilnya kosong.
+2. **`recursive_eval.py::run_all_models()`** -- kalau `04_recursive_evaluate.py`
+   dijalankan sebelum ada model `.joblib` sama sekali, `detail_frames`
+   tetap `[]`, lalu `pd.concat([])` raise `ValueError` mentah (tidak
+   ketangkep `except FileNotFoundError` di caller). Fix: raise
+   `FileNotFoundError` eksplisit & jelas kalau `detail_frames` kosong --
+   otomatis ketangkep handler yang sudah ada di `04_recursive_evaluate.py`,
+   TIDAK perlu ubah file itu.
+
+Temuan lain dari audit (BELUM diperbaiki, didokumentasikan buat sesi
+depan kalau relevan): duplikasi listing di `ftp_client.py::list_directory()`
+saat MLSD gagal parsial (fallback NLST tidak reset `files`/`subdirs`);
+file yang gagal `ValueError` di `01_download_data.py::process_one_file()`
+tidak pernah ditandai "sudah dicek" jadi di-retry selamanya (SENGAJA TIDAK
+difix atas permintaan Dhika, "itu dah fix" -- kemungkinan sudah ditangani
+di luar sesi Claude); noise-injection stale terhadap `diagnose_recursive_drift.py`
+(tool ini bandingin ke distribusi training MENTAH, bukan yang sudah
+dinoise, jadi laporan drift-nya bisa terlihat lebih parah dari kenyataan
+utk model yang dilatih dgn `--noise-std`); `visualize.py` "MAE step ini"
+di judul GIF tidak ikut ke-filter `--mask-outside-bandung` (cuma
+berpengaruh kalau flag itu dipakai bareng CSV yang `y_true`-nya terisi);
+HTML injection di `telegram_notifier.py` (`error_msg` tidak di-escape
+sebelum masuk tag `<code>`/`<b>`, notifikasi bisa silently gagal kirim
+kalau teks error kebetulan ada `<`/`>`/`&`).
+
+### 22.2 `scripts/tools/generate_summary_report.py` (BARU) -- ringkasan Stage 02-05 buat bahan presentasi
+
+Diminta Dhika: bahan presentasi (PPT) dari hasil pipeline -- **BUKAN**
+generate file `.pptx` (ditolak eksplisit, "gua cuma pengen lu kasih data
+ringkasannya aja") -- outputnya tabel Markdown + chart PNG, disusun
+manual jadi slide oleh Dhika.
+
+- **Sumber data**: Stage 02 (`expanding_features.csv`, 3GB+, dibaca
+  **CHUNKED** cuma 4 kolom -- full scan 13,6 juta baris cuma **32 detik**,
+  BUKAN load penuh ke RAM), Stage 03 (`training_summary.csv`, kecil),
+  Stage 04 (`recursive_mae_summary.csv`, kecil -- BUKAN
+  `recursive_evaluation.csv` yang 700MB+), Stage 05 (`forecast.csv` dari
+  1 run terpilih).
+- **Pemilihan run forecast**: pola SAMA PERSIS dgn `06_visualize.py` --
+  reuse `discover_forecast_files()`/`prompt_select_forecast_file()` (menu
+  navigasi panah/PageUp-PageDown, auto-pick kalau cuma 1 hasil), flag
+  `--csv` buat override langsung (skip menu).
+- **Output**: folder-per-run `summary_report/{model}_t0..._run.../`
+  (`summary.md` + `charts/*.png`), pola SAMA PERSIS dgn
+  `visualizations/`/`forecast_output/` -- idempotent terhadap run
+  forecast sumbernya (run yang SAMA -> overwrite folder yang sama, run
+  BEDA -> folder baru, retensi per-run). Kalau belum ada forecast SAMA
+  SEKALI, section itu di-skip (report tetap jalan buat 02-04) -- fallback
+  ke folder `no_forecast_data/`. Esc di menu pilih forecast MEMBATALKAN
+  SELURUH report (bukan cuma section 05) -- keputusan sadar, konsisten
+  sama `06_visualize.py`.
+- **8 chart**: distribusi anchor per bulan, MAE&RMSE per model, waktu
+  training per model, MAE per step (3 model overlay), spatial_collapse_ratio
+  per step, spatial_correlation per step, peta sample Prediksi/Aktual/
+  Error Map (step terpilih, default step terakhir), MAE per step run
+  forecast itu sendiri (kalau ada `y_true`). Warna reuse `pipeline/visualize.py`
+  (biru/oranye/aqua per model tetap, kategorikal fixed-order, validasi
+  skill `dataviz`), satu sumbu per chart (no dual-axis).
+- **Ketiadaan `tabulate`**: `DataFrame.to_markdown()` butuh package
+  `tabulate` yang TIDAK terinstall di environment ini -- diganti helper
+  `_df_to_markdown()` manual (hindari nambah dependency baru buat 1
+  fungsi kecil).
+- `Config.SUMMARY_REPORT_DIR` ditambah, `summary_report/` masuk `.gitignore`.
+- **Divalidasi** end-to-end data ASLI: full scan Stage 02 (32 detik, angka
+  match persis CLAUDE.md: 13.621.230 baris, 756.735 anchor, 35/35 pixel),
+  `--csv` override (folder sama = overwrite, idempotent terkonfirmasi),
+  folder forecast kosong (fallback `no_forecast_data/`, section 03-04
+  tetap lengkap).
+
+### 22.3 Sweep `noise_std` (BARU, `scripts/tools/sweep_noise_std.py`) -- konfirmasi `noise_std=2.5` sudah dekat-optimal
+
+**Latar belakang**: setelah investigasi ulang alur rekursif (exposure
+bias, §17), Dhika minta cara "ngebenerin" akumulasi error di rollout.
+`noise_std=2.5` (nilai produksi sejak §17/§18) SEBELUMNYA cuma dicoba
+SEKALI (tidak pernah di-sweep sistematis kayak `damping_factor`, §17
+poin 6). Opsi lain yang dipertimbangkan (scheduled sampling/true
+recursive training, step-dependent noise, buka lagi reliability
+calibration) DITOLAK/ditunda -- dipilih sweep sistematis dulu krn effort
+paling rendah & reuse infra yang sudah ada.
+
+**Beda dari `sweep_damping.py`**: `noise_std` itu parameter TRAINING
+(disuntik sebelum `model.fit()`), BUKAN post-hoc kayak `damping_factor`
+-- jadi tool ini WAJIB **retrain 3 model per nilai** (bukan reuse model
+yang sudah ada), jauh lebih mahal. Desain: load dataset CSV (3GB+) + cache
+raw + anchor test set **SEKALI** (semuanya independen dari `noise_std`,
+cuma bergantung `test_frac`), dipakai ulang di semua nilai sweep --
+tiap nilai dapet subfolder model SENDIRI (`Config.NOISE_SWEEP_MODELS_DIR`
+= `models_noise_sweep/noise{XXX}/`), **TIDAK PERNAH menimpa model
+produksi** di `Config.EXPANDING_MODELS_DIR`. Output eval per nilai pakai
+suffix `_noiseXXX` (pola sama persis suffix `_dampXX`), + file gabungan
+`evaluation/noise_std_sweep_comparison.csv`.
+
+**Hasil sweep** (5 nilai: `0.0, 1.5, 2.5, 3.5, 5.0`, data & model ASLI,
+~52 menit total, dijalankan background):
+
+MAE step 18 (rata-rata 3 model): `0.0`=14,13K, `1.5`=13,44K,
+**`2.5`=13,17K (minimum)**, `3.5`=13,22K, `5.0`=13,43K -- pola **U-shape
+bersih dgn `2.5` sebagai titik minimum, KONSISTEN di HAMPIR SELURUH
+horizon** (step 4-18, bukan cuma step 18) -- **TIDAK ADA crossover**
+seperti yang ditemukan di damping sweep (§17 poin 6 vs §18.9). Step 1-3
+sedikit favorit ke nilai lebih kecil (`0.0`/`1.5`), tapi selisihnya
+recehan (<0,03K) krn noise memang didesain no-op di step 1 & efeknya
+minim di step awal.
+
+`spatial_collapse_ratio`/`spatial_correlation` **terus membaik MONOTON**
+seiring `noise_std` naik 0->5,0 (TIDAK plateau di `2.5` seperti MAE) --
+`2.5` itu titik minimum MAE, BUKAN titik terbaik utk metrik spasial.
+Trade-off `3.5` vs `2.5`: MAE naik tipis (+0,2% s/d +1,1%), kelebihan
+`spatial_collapse_ratio` dari 1 turun 15-68%, `spatial_correlation` naik
+sampai +5% relatif di step 12-18 -- TAPI secara ABSOLUT gain-nya kecil
+(`spatial_correlation` step 18 cuma 0,172->0,180, `ratio` 1,36->1,30,
+keduanya masih jauh dari ideal) -- `3.5` BUKAN "benerin" spatial
+collapse, cuma sedikit mengurangi separahnya.
+
+**KEPUTUSAN FINAL**: **`noise_std=2.5` DIPERTAHANKAN** (tidak ada
+perubahan ke model produksi). Alasan: (1) requirement resmi dosen itu
+MAE per step (§7), bukan spatial metrics (itu diagnostik tambahan, §15);
+(2) gain spasial dari `3.5` kecil secara absolut, jadi trade-off-nya
+bukan "MAE dikit vs masalah utama teratasi" tapi "MAE dikit vs masalah
+tetap ada, cuma agak berkurang"; (3) konsisten sama pola argumen yang
+sudah dipakai buat `damping_factor=1.0` (§18.9) -- prioritas MAE horizon
+panjang menang dari gain spasial marginal. **Sweep ini murni
+KONFIRMASI/VALIDASI empiris** bahwa nilai `2.5` yang dipilih ad-hoc dulu
+(§17 poin 7, "mulai dari ~MAE step-1 aktual") ternyata SUDAH dekat-optimal
+-- bukan penemuan nilai baru.
+
+**Kalau nanti mau dibenerin "beneran"** (bukan cuma nudge kecil kayak
+naikin `noise_std`), opsi yang masih belum dicoba: scheduled sampling/
+true recursive training (model dilatih pakai window yang BENERAN diisi
+prediksi model itu sendiri, bukan noise sintetis -- fix paling struktural
+tapi effort tinggi, perlu training loop iteratif baru) atau noise
+bertingkat per posisi window (magnitude naik seiring jarak dari
+observasi asli, bukan seragam) -- keduanya BELUM diimplementasi, cuma
+didiskusikan sbg opsi.
+
+Artifact sweep (model per nilai + CSV eval per nilai) TETAP ada di disk
+(`models_noise_sweep/`, `evaluation/*_noiseXXX.csv`, keduanya gitignored)
+buat referensi/audit ulang kalau dibutuhkan -- TIDAK dihapus.
+
+---

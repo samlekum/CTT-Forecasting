@@ -167,6 +167,12 @@ class Config:
     # Fraksi test default untuk stratified_monthly_split() di Tahap 3.
     TEST_FRAC = 0.15
 
+    # Direktori dasar buat scripts/tools/sweep_noise_std.py -- tiap nilai
+    # noise_std yang di-sweep dapet subfolder SENDIRI (noise{XXX}/) berisi
+    # model .joblib + training_summary.csv, TERPISAH dari EXPANDING_MODELS_DIR
+    # produksi (sweep TIDAK PERNAH menimpa model produksi yang lagi dipakai).
+    NOISE_SWEEP_MODELS_DIR = os.path.join(PROJECT_ROOT, "models_noise_sweep")
+
     # ------------------------------------------------------------------
     # Konfigurasi khusus INFERENCE (Tahap 6 / 05_run_inference.py). Baca
     # file .nc TERBARU di FINAL_BASE_DIR (data_bandung/) langsung -- BUKAN

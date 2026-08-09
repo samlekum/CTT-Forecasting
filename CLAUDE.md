@@ -2301,6 +2301,26 @@ manual jadi slide oleh Dhika.
   folder forecast kosong (fallback `no_forecast_data/`, section 03-04
   tetap lengkap).
 
+**Ringkasan TERMINAL** (revisi, sesi lanjutan): Dhika minta angka penting
+JUGA muncul di terminal (bukan cuma file) -- didiskusikan dulu (2 opsi
+layout diajukan lewat preview ASCII, Dhika pilih "blok terpisah per
+model"). `print_terminal_summary()` (dipanggil di akhir `main()`) nampilin:
+(1) Dataset -- total baris/pixel/anchor + distribusi anchor per bulan;
+(2) SATU blok per model (`=== XGBOOST ===` dst) -- training flat
+(MAE/RMSE/R2/waktu/noise_std), recursive MAE chain di step milestone
+(1/6/12/18), spatial ratio+correlation di step terakhir -- lalu baris
+`>> MODEL PRODUCTION` (auto-detect); (3) **Eksperimen tuning** -- baca
+`evaluation/noise_std_sweep_comparison.csv`/`damping_sweep_comparison.csv`
+KALAU ADA (tool terpisah, `sweep_noise_std.py`/`sweep_damping.py`, wajar
+belum tentu pernah dijalankan -- pesan "belum pernah di-sweep" kalau file
+nggak ada, bukan error); (4) contoh forecast -- MAE per step milestone vs
+observasi asli (kalau ada `y_true`). Nggak ada file baru/dependency baru
+-- print() polos ke stdout, reuse dataframe yang sudah di-load buat
+markdown/chart (tidak baca ulang apapun). Divalidasi data ASLI: angka
+sweep di terminal match PERSIS analisis manual sebelumnya (14.167/13.433/
+13.177/13.240/13.420 di step 18), section damping sweep benar nampilin
+"belum pernah dijalankan" (file itu memang belum ada saat ini).
+
 ### 22.3 Sweep `noise_std` (BARU, `scripts/tools/sweep_noise_std.py`) -- konfirmasi `noise_std=2.5` sudah dekat-optimal
 
 **Latar belakang**: setelah investigasi ulang alur rekursif (exposure

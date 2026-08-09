@@ -402,6 +402,138 @@ def chart_sample_forecast_mae_per_step(detail_df, out_path):
 
 
 # ============================================================================
+# Ringkasan terminal (selain file summary.md + chart -- diminta Dhika biar
+# angka penting langsung keliatan pas run, nggak perlu buka file). Blok
+# per-model (bukan 1 tabel gabungan) + section tambahan dataset/tuning,
+# skema dikonfirmasi lewat diskusi sebelum diimplementasi.
+# ============================================================================
+
+def _milestone_steps(horizon, steps=(1, 6, 12, 18)):
+    steps = [s for s in steps if s <= horizon]
+    if horizon not in steps:
+        steps.append(horizon)
+    return steps
+
+
+def _mae_chain(eval_df, model_name, steps):
+    sub = eval_df[eval_df["model"] == model_name].set_index("step")
+    parts = [f"step{s}={sub.loc[s, 'mae']:.2f}K" for s in steps if s in sub.index]
+    return " -> ".join(parts)
+
+
+def _load_sweep_summary(filename):
+    """Load CSV hasil sweep_damping.py / sweep_noise_std.py kalau ADA --
+    keduanya tool TERPISAH (bukan bagian alur 02-05 utama), jadi wajar
+    kalau belum pernah dijalankan -- return None (bukan error), caller
+    tampilkan pesan "belum pernah di-sweep"."""
+    path = os.path.join(Config.EXPANDING_EVAL_DIR, filename)
+    if not os.path.exists(path):
+        return None
+    return pd.read_csv(path)
+
+
+def _print_sweep_summary(filename, sweep_col, label):
+    df = _load_sweep_summary(filename)
+    if df is None:
+        print(f"{label} sweep: belum pernah dijalankan ({filename} tidak ditemukan di {Config.EXPANDING_EVAL_DIR}).")
+        return
+    last_step = df["step"].max()
+    last_step_df = df[df["step"] == last_step]
+    avg = last_step_df.groupby(sweep_col).agg(
+        mae=("mae", "mean"),
+        spatial_collapse_ratio=("spatial_collapse_ratio", "mean"),
+        spatial_correlation=("spatial_correlation", "mean"),
+    ).reset_index().sort_values(sweep_col)
+    print(f"{label} sweep (rata-rata {df['model'].nunique()} model, step {int(last_step)}):")
+    print(avg.round(3).to_string(index=False))
+
+
+def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
+                            forecast_meta, detail_df, output_dir, charts_dir):
+    horizon = Config.HORIZON_STEPS
+    steps = _milestone_steps(horizon)
+
+    print()
+    print("=" * 60)
+    print("RINGKASAN HASIL - CTT FORECASTING (bahan presentasi)")
+    print("=" * 60)
+
+    print("\n[Dataset - Stage 02]")
+    if dataset_stats is None:
+        print("Tidak tersedia (--skip-dataset dipakai, atau Stage 02 belum jalan).")
+    else:
+        s = dataset_stats
+        print(f"Total baris     : {s['total_rows']:,}")
+        print(f"Jumlah pixel    : {s['n_pixels']}/35 (grid {Config.PIXEL_GRID_SHAPE[0]}x{Config.PIXEL_GRID_SHAPE[1]})")
+        print(f"Jumlah anchor   : {s['n_anchors']:,}")
+        print(f"Rentang anchor  : {s['min_anchor_t0']} s/d {s['max_anchor_t0']}")
+        print("Distribusi per bulan:")
+        for month, count in s["anchors_per_month"].items():
+            print(f"  {month}   {count:,}")
+
+    print("\n" + "-" * 60)
+    print("PERBANDINGAN MODEL")
+    print("-" * 60)
+    if train_df is None and eval_df is None:
+        print("Tidak tersedia -- jalankan 03_train_models.py / 04_recursive_evaluate.py dulu.")
+    else:
+        for model_name in Config.MODEL_NAMES:
+            has_train = train_df is not None and (train_df["model"] == model_name).any()
+            has_eval = eval_df is not None and (eval_df["model"] == model_name).any()
+            if not has_train and not has_eval:
+                continue
+            print(f"\n=== {model_name.upper()} ===")
+            if has_train:
+                row = train_df[train_df["model"] == model_name].iloc[0]
+                print(f"Training : MAE={row['mae']:.4f}K RMSE={row['rmse']:.4f}K R2={row['r2']:.4f} "
+                      f"({row['waktu_training_detik']:.1f}s, noise_std={row['noise_std']})")
+            else:
+                print("Training : tidak tersedia")
+            if has_eval:
+                print(f"Recursive: {_mae_chain(eval_df, model_name, steps)}")
+                last = eval_df[(eval_df["model"] == model_name) & (eval_df["step"] == horizon)]
+                if not last.empty:
+                    r = last.iloc[0]
+                    print(f"Spasial  : ratio={r['spatial_collapse_ratio']:.3f} "
+                          f"correlation={r['spatial_correlation']:.3f} (step{horizon})")
+            else:
+                print("Recursive: tidak tersedia")
+
+        if production_model is not None:
+            model_name, avg_mae, _ranking = production_model
+            print(f"\n>> MODEL PRODUCTION (auto-detect, prioritas step {Config.INFERENCE_PRIORITY_STEP_RANGE}): "
+                  f"{model_name} (avg MAE={avg_mae:.4f}K)")
+
+    print("\n" + "-" * 60)
+    print("EKSPERIMEN TUNING (kalau pernah di-sweep)")
+    print("-" * 60)
+    _print_sweep_summary("noise_std_sweep_comparison.csv", "noise_std", "noise_std")
+    print()
+    _print_sweep_summary("damping_sweep_comparison.csv", "damping_factor", "damping_factor")
+
+    print("\n" + "-" * 60)
+    print("CONTOH HASIL FORECAST (Stage 05)")
+    print("-" * 60)
+    if forecast_meta is None:
+        print("Tidak tersedia -- jalankan 05_run_inference.py dulu.")
+    else:
+        print(f"Model         : {forecast_meta['model_name']}")
+        print(f"t0            : {forecast_meta['t0']}")
+        print(f"Jumlah pixel  : {forecast_meta['n_pixels']}/35")
+        per_step = detail_df.dropna(subset=["y_true"]).groupby("step")["abs_error"].mean()
+        if per_step.empty:
+            print("MAE per step  : tidak ada observasi asli (forecast ke masa depan genuine).")
+        else:
+            parts = [f"step{s}={per_step[s]:.2f}K" for s in steps if s in per_step.index]
+            print(f"MAE per step  : {' -> '.join(parts)} (vs observasi asli)")
+
+    print("\n" + "=" * 60)
+    print(f"Laporan lengkap : {os.path.join(output_dir, 'summary.md')}")
+    print(f"Chart           : {charts_dir}")
+    print("=" * 60)
+
+
+# ============================================================================
 # Markdown report
 # ============================================================================
 
@@ -582,6 +714,9 @@ def main():
     hr()
     say_ok(f"Ringkasan tersimpan: {md_path}")
     say_ok(f"Chart tersimpan di: {charts_dir}")
+
+    print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
+                            forecast_meta, detail_df, output_dir, charts_dir)
 
 
 if __name__ == "__main__":

@@ -433,10 +433,11 @@ def _load_sweep_summary(filename):
 
 
 def _print_sweep_summary(filename, sweep_col, label):
-    df = _load_sweep_summary(filename)
-    if df is None:
+    path = os.path.join(Config.EXPANDING_EVAL_DIR, filename)
+    if not os.path.exists(path):
         print(f"{label} sweep: belum pernah dijalankan ({filename} tidak ditemukan di {Config.EXPANDING_EVAL_DIR}).")
         return
+    df = pd.read_csv(path)
     last_step = df["step"].max()
     last_step_df = df[df["step"] == last_step]
     avg = last_step_df.groupby(sweep_col).agg(
@@ -445,11 +446,13 @@ def _print_sweep_summary(filename, sweep_col, label):
         spatial_correlation=("spatial_correlation", "mean"),
     ).reset_index().sort_values(sweep_col)
     print(f"{label} sweep (rata-rata {df['model'].nunique()} model, step {int(last_step)}):")
+    print(f"Sumber: {path}")
     print(avg.round(3).to_string(index=False))
 
 
 def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
-                            forecast_meta, detail_df, output_dir, charts_dir):
+                            forecast_meta, detail_df, output_dir, charts_dir,
+                            dataset_csv_path, training_summary_path, eval_summary_path):
     horizon = Config.HORIZON_STEPS
     steps = _milestone_steps(horizon)
 
@@ -461,7 +464,9 @@ def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
     print("\n[Dataset - Stage 02]")
     if dataset_stats is None:
         print("Tidak tersedia (--skip-dataset dipakai, atau Stage 02 belum jalan).")
+        print(f"(Kalau sudah pernah 02_build_expanding_features.py, ada di: {dataset_csv_path})")
     else:
+        print(f"Sumber: {dataset_csv_path}")
         s = dataset_stats
         print(f"Total baris     : {s['total_rows']:,}")
         print(f"Jumlah pixel    : {s['n_pixels']}/35 (grid {Config.PIXEL_GRID_SHAPE[0]}x{Config.PIXEL_GRID_SHAPE[1]})")
@@ -477,6 +482,8 @@ def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
     if train_df is None and eval_df is None:
         print("Tidak tersedia -- jalankan 03_train_models.py / 04_recursive_evaluate.py dulu.")
     else:
+        print(f"Sumber training  : {training_summary_path}{' (tidak ditemukan)' if train_df is None else ''}")
+        print(f"Sumber recursive : {eval_summary_path}{' (tidak ditemukan)' if eval_df is None else ''}")
         for model_name in Config.MODEL_NAMES:
             has_train = train_df is not None and (train_df["model"] == model_name).any()
             has_eval = eval_df is not None and (eval_df["model"] == model_name).any()
@@ -517,6 +524,7 @@ def print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
     if forecast_meta is None:
         print("Tidak tersedia -- jalankan 05_run_inference.py dulu.")
     else:
+        print(f"Sumber        : {forecast_meta['path']}")
         print(f"Model         : {forecast_meta['model_name']}")
         print(f"t0            : {forecast_meta['t0']}")
         print(f"Jumlah pixel  : {forecast_meta['n_pixels']}/35")
@@ -715,8 +723,10 @@ def main():
     say_ok(f"Ringkasan tersimpan: {md_path}")
     say_ok(f"Chart tersimpan di: {charts_dir}")
 
+    training_summary_path = os.path.join(models_dir, "training_summary.csv")
     print_terminal_summary(dataset_stats, train_df, eval_df, production_model,
-                            forecast_meta, detail_df, output_dir, charts_dir)
+                            forecast_meta, detail_df, output_dir, charts_dir,
+                            dataset_csv_path, training_summary_path, eval_summary_path)
 
 
 if __name__ == "__main__":

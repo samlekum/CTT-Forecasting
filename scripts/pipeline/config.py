@@ -245,6 +245,15 @@ class Config:
     # bukan wajib) -- lihat visualize.load_kecamatan_boundaries().
     KOTA_BANDUNG_GEOJSON = os.path.join(PROJECT_ROOT, "scripts", "geojson", "KotaBandung.geojson")
 
+    # Direktori output ringkasan presentasi (scripts/tools/generate_summary_report.py)
+    # -- agregat Stage 02-05 (statistik dataset, perbandingan model, MAE/metrik
+    # spasial per step, contoh forecast) jadi tabel Markdown + chart PNG siap
+    # dipakai bahan PPT. Folder-per-run (pola SAMA PERSIS dgn INFERENCE_DIR/
+    # VISUALIZATION_DIR): {model}_t0..._run.../ -- identitas run forecast Stage
+    # 05 yang dipilih via menu CLI, SENGAJA idempotent (re-generate dari run
+    # forecast yang SAMA overwrite folder yang sama, run BEDA bikin folder baru).
+    SUMMARY_REPORT_DIR = os.path.join(PROJECT_ROOT, "summary_report")
+
     # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
     # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
     # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run

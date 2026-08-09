@@ -58,6 +58,9 @@ forecast_output/
 
 # Visualization Output
 visualizations/
+
+# Presentation Summary Report
+summary_report/
 _backup_before_leakage_fix_20260808_202804
 
 # Graphify

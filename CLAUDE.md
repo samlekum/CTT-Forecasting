@@ -2387,10 +2387,13 @@ bertingkat per posisi window (magnitude naik seiring jarak dari
 observasi asli, bukan seragam) -- keduanya BELUM diimplementasi, cuma
 didiskusikan sbg opsi.
 
-Artifact sweep (model per nilai + CSV eval per nilai) TETAP ada di disk
+Artifact sweep (model per nilai + CSV eval per nilai) awalnya disimpan
 (`models_noise_sweep/`, `evaluation/sweep_noise_std/`, keduanya gitignored)
-buat referensi/audit ulang kalau dibutuhkan -- TIDAK dihapus. (Path eval
-direvisi §22.4 di bawah -- awalnya langsung di `evaluation/`, sekarang di
+buat referensi/audit ulang -- **SUDAH DIHAPUS** sesi lanjutan (§23.8,
+Dhika minta "bersih" setelah `step_profile scale=0.85` final dipilih,
+~12,7GB total lintas semua folder sweep). Kalau butuh angka sweep ini
+lagi, cuma ada di riwayat chat/CLAUDE.md ini, TIDAK ada lagi di disk.
+(Path eval direvisi §22.4 di bawah -- awalnya langsung di `evaluation/`, sekarang di
 subfolder.)
 
 ### 22.4 Pisahkan output sweep dari `evaluation/` (revisi, sesi lanjutan)
@@ -2599,5 +2602,74 @@ SALAH** -- cek ulang.
   (mis. 0.75, 0.9, 0.95) -- `scale=0.85` dipilih dari 5 titik yang
   dites, BUKAN dari pencarian eksak/optimasi numerik. Cukup baik utk
   keputusan produksi saat ini, tapi bukan diklaim titik optimal global.
+
+### 23.8 Sesi lanjutan: rebuild resmi 03-06 + 9 kombinasi model x t0 + cleanup total
+
+Diminta Dhika setelah §23.5-23.7: (1) bersihin hasil metode lama, (2)
+jalankan ulang pipeline pakai konfigurasi final, (3) generate forecast +
+visualisasi utk **SEMUA 3 model** (bukan cuma auto-detect terbaik) di
+**3 t0 yang SAMA** mewakili musim hujan/peralihan/kemarau -- biar bisa
+dibandingkan langsung antar model di kondisi yang identik.
+
+**Klarifikasi scope dulu** (via pertanyaan eksplisit sebelum eksekusi,
+sesuai kebiasaan §11): Stage 02 TIDAK di-rebuild (baca ulang 34.420 file
+.nc ~4 jam, TAPI datanya SAMA PERSIS nggak peduli metode noise -- noise
+injection baru masuk di Stage 03, jadi rebuild 02 buang waktu tanpa
+manfaat). Mulai dari 03.
+
+**t0 yang dipakai** (representasi musim, dalam rentang data 2025-12-01 s/d
+2026-07-31): `2026-01-15 12:00:00` (musim hujan, puncak Des-Feb),
+`2026-04-15 12:00:00` (peralihan, transisi Mar-Mei), `2026-07-15 12:00:00`
+(kemarau -- paling kering yang datanya ADA, krn Agustus-September belum
+terekam).
+
+**Urutan eksekusi**:
+1. **Retrain resmi via `03_train_models.py`** (bukan copy manual kayak
+   promosi awal §23.5) -- `--noise-step-profile <backup eval lama>
+   --noise-step-profile-scale 0.85`. WAJIB pakai file eval LAMA (era
+   `noise_std=2.5` konstan, dari backup) sbg sumber kurva profil, BUKAN
+   `evaluation/recursive_mae_summary.csv` yang SEKARANG (itu udah
+   punya model baru) -- kalau dibolak-balik jadi bootstrap
+   self-referential (kurva model baru dipakai buat generate model baru
+   lagi), BEDA dari yang sudah divalidasi di sweep §23.4. Hasilnya
+   **identik bit-for-bit** dgn model yang dipromosikan manual sebelumnya
+   (MAE flat sama persis sampai belasan digit desimal) -- deterministic,
+   `random_state=42` konsisten di training & noise injection.
+2. **Backup lama DIHAPUS** (`_backup_models_before_step_profile_*/`,
+   `_backup_eval_before_step_profile_*/`) -- SETELAH retrain di poin 1
+   berhasil & keliatan konsisten, urutan ini sengaja (backup dipakai
+   sbg sumber profil di poin 1, jangan dihapus duluan).
+3. **`04_recursive_evaluate.py` di-run ulang** -- regenerate
+   `evaluation/recursive_evaluation.csv`/`recursive_mae_summary.csv`
+   resmi, hasilnya match persis poin 1.
+4. **`05_run_inference.py` x9** -- loop 3 model (`--model xgboost/
+   lightgbm/catboost`) x 3 t0 di atas, SEMUA eksplisit (bukan
+   auto-detect) -- 35/35 pixel sukses di semua 9 kombinasi, 0 error/skip.
+5. **`06_visualize.py --csv` x9** -- satu GIF per forecast, semua sukses.
+
+**Cleanup lanjutan** (2 putaran, diminta terpisah):
+- Putaran 1: folder orphan sisa run SEBELUM sesi ini (source
+  `forecast_output/`-nya udah dihapus Dhika manual) --
+  `visualizations/lightgbm_t020260101_1010_run20260809_1145/`,
+  `summary_report/lightgbm_t020260101_1010_run20260809_1145/`,
+  `summary_report/lightgbm_t020260601_1010_run20260809_1325/` -- dihapus.
+- Putaran 2: **SEMUA artifact sweep/eksperimen** (`models_noise_sweep/`,
+  `models_step_noise_experiment/`, `models_step_noise_sweep/`,
+  `evaluation/sweep_noise_std/`, `evaluation/sweep_damping/`,
+  `evaluation/experiment_step_noise/`, `evaluation/sweep_step_noise/`)
+  -- **DIHAPUS TOTAL** (~12,7GB: `sweep_noise_std` 3,7GB, `sweep_damping`
+  6,7GB, `sweep_step_noise` 2,3GB, sisanya folder model kecil). Beda dari
+  §23.5 yang tadinya SENGAJA nyimpen ini sbg bukti -- Dhika eksplisit
+  minta "bersih" setelah keputusan `scale=0.85` final & nggak butuh
+  raw evidence lagi di disk (riwayat keputusan tetap ada di CLAUDE.md
+  ini + riwayat chat).
+
+**State akhir**: `models/` (3 `.joblib` + `training_summary.csv`),
+`evaluation/` (2 file resmi SAJA), `forecast_output/` + `visualizations/`
+(9 folder masing-masing, 3 model x 3 t0 seragam), `summary_report/`
+kosong (keisi lagi kalau `generate_summary_report.py` dijalankan). TIDAK
+ADA lagi artifact sweep/eksperimen/backup di disk -- kalau sesi depan
+butuh detail numerik sweep (bukan cuma kesimpulan), rujuk riwayat chat
+sesi §23.3-23.4, bukan file, karena filenya udah nggak ada.
 
 ---

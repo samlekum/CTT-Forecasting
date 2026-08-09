@@ -339,6 +339,12 @@ def run_all_models(models_dir=None, dataset_csv_path=None, cache_path=None, test
             model_name, model, anchors_idx, data_matrix, timeline, damping_factor=damping_factor,
         ))
 
+    if not detail_frames:
+        raise FileNotFoundError(
+            f"Tidak ada model ditemukan di {models_dir} (dicek: {', '.join(Config.MODEL_NAMES)}). "
+            "Jalankan 03_train_models.py dulu, atau cek --models-dir."
+        )
+
     detail_df = pd.concat(detail_frames, ignore_index=True)
     summary_df = summarize_by_step(detail_df)
 

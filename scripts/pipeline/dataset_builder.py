@@ -490,6 +490,8 @@ def build_dataset(data_dir=None, output_path=None, anchor_stride=None, freq_minu
     if max_files is not None:
         entries = entries[:max_files]
         logging.info(f"Mode smoke-test: hanya pakai {len(entries)} file pertama (dari max_files={max_files}).")
+        if not entries:
+            raise ValueError(f"--max-files={max_files} menghasilkan 0 file untuk diproses (butuh >= 1).")
 
     say_info(f"Total file .nc yang akan dibaca: {len(entries)}")
 

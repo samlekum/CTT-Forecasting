@@ -167,6 +167,12 @@ class Config:
     # sengaja DITIMPA tiap sweep dijalankan ulang, TANPA retensi.
     DAMPING_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_damping")
     NOISE_STD_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_noise_std")
+    STEP_NOISE_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_step_noise")
+
+    # Model per nilai scale scripts/tools/sweep_step_noise_scale.py --
+    # TERPISAH dari EXPANDING_MODELS_DIR (produksi) & NOISE_SWEEP_MODELS_DIR
+    # (sweep noise_std konstan), pola sama: TIDAK PERNAH menimpa produksi.
+    STEP_NOISE_SWEEP_MODELS_DIR = os.path.join(PROJECT_ROOT, "models_step_noise_sweep")
 
     # Direktori output model hasil training (Tahap 3) & ringkasan metrik.
     # Dipakai model_training.py / 03_train_models.py. Path model per-model:

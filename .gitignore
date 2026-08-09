@@ -40,6 +40,8 @@ catboost_info/
 # Models
 models/
 models_noise_sweep/
+models_step_noise_sweep/
+models_step_noise_experiment/
 
 # Log
 *log
@@ -62,7 +64,11 @@ visualizations/
 
 # Presentation Summary Report
 summary_report/
-_backup_before_leakage_fix_20260808_202804
+
+# Backup snapshots (dibuat manual sebelum operasi berisiko -- lihat CLAUDE.md
+# per timestamp, bukan bagian permanen pipeline, hapus manual kalau sudah
+# tidak diperlukan)
+_backup_*/
 
 # Graphify
 graphify-out/cache/

@@ -2425,3 +2425,179 @@ sweep di terminal, keduanya nunjukkin "Sumber: .../sweep_noise_std/..."
 / ".../sweep_damping/..." dgn benar).
 
 ---
+
+## 23. `step_noise_profile` -- noise injection PER KEDALAMAN ROLLOUT (BARU, model produksi berubah)
+
+**STATUS SINGKAT**: perbaikan struktural atas `inject_recursive_style_noise()`
+(§17 poin 7) -- noise yang disuntik pas training sekarang PROPORSIONAL ke
+kedalaman rollout (pakai kurva MAE aktual per step), bukan konstan
+`noise_std=2.5` di semua kedalaman. Terbukti (retrain + eval nyata, BUKAN
+simulasi) MEMPERBAIKI SIGNIFIKAN `spatial_collapse_ratio`/
+`spatial_correlation` di step 5-18 dengan cost MAE kecil. **Model produksi
+SEKARANG pakai konfigurasi ini** (`scale=0.85`), menggantikan
+`noise_std=2.5` konstan yang jadi produksi sejak §17-§18.
+
+### 23.1 Motivasi
+
+Dhika nanya lagi "kenapa prediksinya jadi rata secara spasial di jam-jam
+akhir, gimana cara benerin beneran" setelah sesi audit (§22) menyimpulkan
+`noise_std=2.5` konstan sudah dekat-optimal TAPI cuma utk metrik MAE --
+`spatial_collapse_ratio` step 18 masih ~1.36 (36% kelebihan dari ideal=1),
+`spatial_correlation` masih rendah (~0.17). Root cause yang diidentifikasi:
+`inject_recursive_style_noise()` nyuntik magnitude **KONSTAN** ke semua
+titik window yang "dianggap prediksi", padahal error rollout ASLI membesar
+seiring kedalaman (MAE step 2 ~4K, step 18 ~13K) -- window training yang
+mensimulasikan kedalaman dangkal jadi OVER-noised relatif ke error
+asli-nya, window yang mensimulasikan kedalaman dalam jadi UNDER-noised.
+
+### 23.2 Desain: `build_step_noise_profile()` + parameter `step_noise_profile`
+
+`pipeline/model_training.py`:
+- `build_step_noise_profile(summary_path, scale=1.0)` -- baca
+  `recursive_mae_summary.csv` yang SUDAH ADA (biasanya hasil model
+  produksi saat ini), rata-rata MAE lintas model per step, dikali `scale`.
+  Return `pd.Series` index=step (1..HORIZON_STEPS-1), value=std noise
+  (Kelvin) buat kedalaman itu.
+- `inject_recursive_style_noise()` dapet parameter baru `step_noise_profile`
+  (default `None` = perilaku lama, `noise_std` konstan, 100%
+  backward-compatible). Kalau diisi: kolom ke-j (0-indexed) di region
+  window yang ternoise mensimulasikan hasil prediksi rollout **STEP
+  (j+1)** -- noise kolom itu pakai `step_noise_profile[j+1]`, BUKAN
+  `noise_std` konstan. KeyError eksplisit kalau ada step yang kepakai
+  tapi nggak ada di profile (bukan silent fallback).
+- `train_all_models()` diteruskan parameter yang sama, label kolom
+  `noise_std` di `training_summary.csv` jadi
+  `step_profile[{min:.2f}-{max:.2f}]` (mis. `step_profile[2.24-11.20]`)
+  -- bukan cuma string generik "step_profile" (revisi kecil, biar
+  telusurable persis rentang noise yang beneran dipakai tanpa perlu
+  reproduce ulang scale-nya).
+- `03_train_models.py`: flag baru `--noise-step-profile <path ke
+  recursive_mae_summary.csv>` + `--noise-step-profile-scale <float,
+  default 1.0>`. `--noise-std` DIABAIKAN kalau `--noise-step-profile`
+  diisi. `--models-dir` juga ditambah (sebelumnya HARDCODE ke
+  `Config.EXPANDING_MODELS_DIR`, nggak bisa dialihkan ke folder
+  eksperimen -- WAJIB buat testing tanpa nimpa produksi).
+
+**Smoke-test SEBELUM retrain mahal** (data asli, subset 200rb baris,
+dibandingkan compute_window_features_matrix): step 1 (n_points=6) 100%
+no-op terkonfirmasi, konsistensi fisik (min<=mean<=max) terjaga 100% di
+semua baris ternoise, 100% baris step>1 berubah -- semua sesuai desain
+sebelum dilanjut ke retrain penuh (~10 menit/percobaan, mahal, sesuai
+kebiasaan kerja §11 "validasi di subset kecil dulu sebelum full-run").
+
+### 23.3 Eksperimen 1: profil mentah (`scale=1.0`) vs konstan `2.5`
+
+Retrain 3 model ke folder terpisah (`models_step_noise_experiment/`,
+BUKAN produksi), eval recursive, dibandingkan ke baseline
+`noise_std=2.5` konstan (rata-rata 3 model, step 18):
+
+| Metrik | Konstan 2.5 | step_profile scale=1.0 | Δ |
+|---|---|---|---|
+| MAE | 13.177K | 13.445K | +2.03% |
+| `spatial_collapse_ratio` | 1.360 | 1.154 | excess turun 57.4% |
+| `spatial_correlation` | 0.172 | 0.190 | +10.64% |
+
+Pola per step: titik infleksi di step 4-5 -- SEBELUM itu step_profile
+kalah tipis di semua metrik (window "dangkal" jadi porsi training yang
+berubah relatif besar, geser fit model), SETELAH itu step_profile menang
+membesar di ratio/correlation dengan cost MAE stabil ~1-2%. Persentase
+"kelebihan" di step 1-2 (mis. "+473%") itu ARTEFAK denominator kecil
+(dua-duanya sudah dekat 1), BUKAN sinyal masalah nyata.
+
+### 23.4 Eksperimen 2: sweep scale factor -- `scale=0.85` MENGALAHKAN `scale=1.0`
+
+Tool baru `scripts/tools/sweep_step_noise_scale.py` (pola SAMA PERSIS
+`sweep_noise_std.py` -- load dataset+cache+anchor SEKALI, retrain per
+nilai ke subfolder `Config.STEP_NOISE_SWEEP_MODELS_DIR/scale{XXX}/`,
+TIDAK PERNAH menimpa produksi). Sweep `scale=0.3, 0.6, 0.85` (~46.5
+menit total), digabung dgn titik yang SUDAH ADA (`scale=0.0` = identik
+`noise_std=0` dari sweep §22.3, `scale=1.0` = eksperimen 23.3).
+
+**Temuan mengejutkan**: `scale=0.3` MENANG MAE di **SEMUA** 18 step
+dibanding konstan 2.5 (bukan trade-off) -- TAPI kalah di KEDUA metrik
+spasial (ratio 1.386 vs 1.360, correlation 0.166 vs 0.172 di step 18).
+Artinya scale rendah BUKAN "versi aman" dari profil, itu titik trade-off
+yang beda arah sama sekali -- MAE turun tapi ratio/correlation nggak
+ikut membaik di scale serendah itu.
+
+**Temuan utama**: `scale=0.85` MENDOMINASI `scale=1.0` di 2 dari 3
+metrik (step 18, rata-rata 3 model):
+
+| Metrik | scale=0.85 | scale=1.0 | Pemenang |
+|---|---|---|---|
+| MAE | 13.420K (+1.84% vs baseline) | 13.445K (+2.03%) | **0.85** |
+| `spatial_correlation` | 0.193 (+12.36%) | 0.190 (+10.64%) | **0.85** |
+| `spatial_collapse_ratio` | 1.182 (excess -49.55%) | 1.154 (excess -57.39%) | 1.0 (tipis) |
+
+Pola ini KONSISTEN dari step 5 sampai 18 (bukan cuma step 18) -- profil
+MENTAH (`scale=1.0`) sedikit OVERSHOOT, nambah magnitude lagi di atas
+0.85 nggak nambah manfaat net. Regresi step 1-4 juga sedikit lebih
+ringan di `scale=0.85` (MAE step 1 +5.8% vs `scale=1.0`'s +7.5%).
+
+Tabel lengkap `scale=0.85` vs konstan 2.5, semua 18 step, ada di
+`evaluation/sweep_step_noise/step_noise_scale_sweep_comparison.csv` +
+riwayat chat sesi ini.
+
+### 23.5 Keputusan final: `scale=0.85` jadi model produksi
+
+Dikonfirmasi eksplisit oleh Dhika ("yauda gas menggunakan itu") setelah
+diklarifikasi bahwa TIDAK ADA titik yang menang di MAE DAN ratio
+sekaligus (genuinely trade-off, bukan belum ketemu) -- `scale=0.85`
+dipilih sbg titik seimbang terbaik dari 5 titik yang dites (0, 0.3, 0.6,
+0.85, 1.0).
+
+**Langkah promosi ke produksi** (sesi ini):
+1. Backup model lama -> `_backup_models_before_step_profile_<timestamp>/`
+   (BUKAN dihapus).
+2. Copy `models_step_noise_sweep/scale085/*.joblib` +
+   `training_summary.csv` -> `models/` (menimpa produksi).
+3. Backup eval resmi lama -> `_backup_eval_before_step_profile_<timestamp>/`.
+4. **Re-run `04_recursive_evaluate.py` LANGSUNG** (bukan copy dari hasil
+   sweep) terhadap model produksi baru -- angka yang dihasilkan MATCH
+   PERSIS hasil sweep (`run_recursive_evaluation()` fungsi yang sama),
+   jadi ini validasi konsistensi SEKALIGUS regenerasi `evaluation/
+   recursive_evaluation.csv`/`recursive_mae_summary.csv` resmi yang
+   authoritative (dihasilkan skrip Stage 04 sendiri, bukan tool sweep).
+
+**DAMPAK TAK TERDUGA**: model production AUTO-DETECT (`select_inference_model()`,
+prioritas step 12-18) BERUBAH dari `lightgbm` (era `noise_std=2.5`
+konstan) jadi **`catboost`** (avg MAE=12.1751K, vs xgboost=12.2405K,
+lightgbm=12.2556K) -- ranking model berubah krn karakteristik training
+data berubah (noise per-kedalaman), bukan cuma angka MAE keseluruhan
+yang bergeser. **Kalau ada script/workflow manapun yang HARDCODE
+`lightgbm` sbg model production (bukan pakai auto-detect), itu SEKARANG
+SALAH** -- cek ulang.
+
+### 23.6 Yang MASIH STALE setelah perubahan ini (perlu di-regenerate kalau dibutuhkan)
+
+- `forecast_output/*/forecast.csv` yang SUDAH ADA (dari sebelum sesi ini)
+  dihasilkan model LAMA (`noise_std=2.5` konstan, kebanyakan `lightgbm`)
+  -- BUKAN dari model produksi baru. Contoh forecast di
+  `generate_summary_report.py` §4 masih nunjukkin hasil model lama
+  sampai `05_run_inference.py` dijalankan ulang.
+- `evaluation/sweep_noise_std/`, `evaluation/sweep_damping/` (hasil
+  sweep §17/§22.3) itu SEMUA dihasilkan terhadap model/split ERA LAMA
+  (`noise_std` konstan, bahkan sebagian sebelum purge-fix §18) --
+  masih valid sbg REFERENSI HISTORIS ("bagaimana kita sampai ke sini"),
+  TAPI bukan lagi representasi model produksi saat ini. Kalau mau
+  sweep damping_factor ulang utk model `step_profile scale=0.85` ini
+  (belum pernah dicoba -- kombinasi step_noise_profile x damping_factor
+  itu ruang yang BELUM dieksplorasi sama sekali), perlu run baru.
+
+### 23.7 Belum dikerjakan / opsi lanjutan (kalau nanti mau dikejar lagi)
+
+- **Scheduled sampling / true recursive training** -- fix paling
+  struktural (model dilatih pakai window yang BENERAN diisi prediksi
+  model itu sendiri dari checkpoint sebelumnya, bukan noise sintetis
+  apapun bentuknya) -- masih BELUM dicoba, effort tinggi (training loop
+  iteratif baru).
+- **Kombinasi `step_noise_profile` x `damping_factor`** -- belum
+  dieksplorasi. Kemungkinan damping_factor optimal GESER lagi sekarang
+  model sudah lebih robust ke window kotor (pola yang sama kejadian di
+  §18.9 setelah noise injection konstan pertama kali ditambahkan).
+- Titik scale antara 0.6-0.85 atau 0.85-1.0 belum di-grid lebih halus
+  (mis. 0.75, 0.9, 0.95) -- `scale=0.85` dipilih dari 5 titik yang
+  dites, BUKAN dari pencarian eksak/optimasi numerik. Cukup baik utk
+  keputusan produksi saat ini, tapi bukan diklaim titik optimal global.
+
+---

@@ -196,7 +196,41 @@ def get_feature_target(df, feature_columns=None):
     return X, y
 
 
-def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=42):
+def build_step_noise_profile(summary_path, scale=1.0):
+    """Bangun profil noise_std PER KEDALAMAN ROLLOUT dari
+    `recursive_mae_summary.csv` yang SUDAH ADA (biasanya hasil evaluasi
+    model produksi saat ini) -- rata-rata MAE lintas model di tiap step,
+    dipakai sbg magnitude noise KHUSUS titik window yang mensimulasikan
+    kedalaman step itu (lihat `inject_recursive_style_noise()` parameter
+    `step_noise_profile`).
+
+    KENAPA: `noise_std` konstan (dipakai default) menyuntik magnitude yang
+    SAMA ke semua titik "dianggap prediksi", padahal error rollout asli
+    membesar seiring kedalaman (MAE step 2 ~4K, step 18 ~13K) -- window
+    training yang mensimulasikan kedalaman dangkal jadi OVER-noised
+    relatif ke error asli-nya, window yang mensimulasikan kedalaman dalam
+    jadi UNDER-noised. Profil ini bikin magnitude noise per titik
+    mengikuti kurva error yang BENERAN terukur, bukan angka konstan.
+
+    scale : float, default 1.0
+        Faktor pengali seluruh profil (SEBELUM dipakai inject) -- ditambah
+        setelah eksperimen pertama (scale=1.0, profil mentah) terbukti
+        signifikan membaikin spatial_collapse_ratio/correlation TAPI
+        nge-regresi MAE step 1-4 (window "dangkal" ternoise proporsi besar
+        dari dataset training, geser fit model). `scale<1.0` buat cari
+        titik tengah -- lihat scripts/tools/sweep_step_noise_scale.py.
+
+    Return
+    ------
+    pd.Series, index=step (int, 1..HORIZON_STEPS-1 cukup -- step
+    HORIZON_STEPS sendiri nggak pernah jadi bagian window manapun, cuma
+    target), value=mae rata-rata lintas model di step itu, dikali `scale`.
+    """
+    df = pd.read_csv(summary_path)
+    return df.groupby("step")["mae"].mean() * scale
+
+
+def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=42, step_noise_profile=None):
     """Redesain noise injection buat skema fitur closed-form project ini
     (BUKAN port verbatim dari `inject_lag_noise()` repo lama -- lihat
     CLAUDE.md §17 poin "Belum dikerjakan" versi sebelumnya, skema fitur di
@@ -238,20 +272,28 @@ def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=4
         dipakai 04_recursive_evaluate.py -- dibutuhkan buat rekonstruksi
         window mentah (dataset CSV cuma nyimpen fitur agregat, bukan raw).
     noise_std : float
-        Std deviasi noise Gaussian (satuan Kelvin, sama seperti unit TBB) yang
-        ditambahkan per TITIK di bagian window yang "dianggap prediksi".
-        noise_std <= 0 -> no-op, return train_df apa adanya (backward-compat).
-        Idealnya mulai dari ~seukuran MAE step-1 aktual (lihat
-        recursive_mae_summary.csv, damping_factor=0.9 -- MAE step 1 ~2.5-2.6K
-        di ketiga model), BUKAN diagreb, WAJIB divalidasi lewat sweep sama
-        seperti damping_factor (re-run sweep_damping.py setelah retrain).
+        Std deviasi noise Gaussian KONSTAN (satuan Kelvin) yang ditambahkan
+        per TITIK di bagian window yang "dianggap prediksi" -- dipakai
+        HANYA kalau `step_noise_profile` TIDAK diisi (None). noise_std <= 0
+        DAN step_noise_profile None -> no-op, return train_df apa adanya
+        (backward-compat). Idealnya mulai dari ~seukuran MAE step-1 aktual,
+        WAJIB divalidasi lewat sweep (`scripts/tools/sweep_noise_std.py`).
+    step_noise_profile : pd.Series, optional (default None)
+        Kalau diisi, magnitude noise jadi PER KEDALAMAN ROLLOUT (bukan
+        konstan) -- index=step (1..HORIZON_STEPS-1), value=std (Kelvin) yg
+        dipakai utk titik window yang mensimulasikan kedalaman step itu
+        (lihat `build_step_noise_profile()`). `noise_std` DIABAIKAN kalau
+        parameter ini diisi. WAJIB mencakup semua step 1..HORIZON_STEPS-1
+        yang mungkin muncul di data -- KeyError eksplisit kalau ada step
+        yang kepakai tapi nggak ada di profile (bukan silent fallback ke
+        NaN/0, yang bisa diam-diam merusak training).
 
     Return
     ------
     pd.DataFrame, sama seperti train_df tapi kolom FEATURE_COLUMNS sudah
     diganti versi noised (kolom lain, termasuk target, TIDAK berubah).
     """
-    if noise_std <= 0:
+    if step_noise_profile is None and noise_std <= 0:
         return train_df
 
     from pipeline.dataset_builder import load_raw_cache
@@ -264,7 +306,13 @@ def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=4
             "get_feature_target() (yang buang kolom pixel_id/anchor_t0/n_points)."
         )
 
-    say_info(f"Noise injection: std={noise_std}K pada window > step 1 (rekonstruksi dari cache)")
+    if step_noise_profile is not None:
+        say_info(
+            f"Noise injection: profil PER-STEP (step 1..{int(step_noise_profile.index.max())}, "
+            f"std {step_noise_profile.min():.2f}K-{step_noise_profile.max():.2f}K) pada window > step 1"
+        )
+    else:
+        say_info(f"Noise injection: std={noise_std}K KONSTAN pada window > step 1 (rekonstruksi dari cache)")
     data_matrix, timeline, pixel_meta = load_raw_cache(cache_path)
     timeline_index = {ts: i for i, ts in enumerate(timeline)}
     pixel_index = {pid: i for i, pid in enumerate(pixel_meta["pixel_id"].values)}
@@ -295,7 +343,21 @@ def inject_recursive_style_noise(train_df, cache_path, noise_std, random_state=4
         window_idx = starts[:, None] + np.arange(L)[None, :]
         series = data_matrix[window_idx, pcols[:, None]].astype(np.float64)
 
-        noise = rng.normal(0.0, noise_std, size=(series.shape[0], n_noised_cols))
+        if step_noise_profile is not None:
+            # Kolom j (0-indexed) di region ternoise mensimulasikan hasil
+            # prediksi rollout STEP (j+1) -- lihat docstring parameter.
+            depth_steps = np.arange(1, n_noised_cols + 1)
+            missing_steps = sorted(set(depth_steps) - set(step_noise_profile.index))
+            if missing_steps:
+                raise KeyError(
+                    f"step_noise_profile tidak punya nilai utk step {missing_steps} "
+                    f"(dibutuhkan utk window n_points={L}) -- profile harus mencakup "
+                    "step 1..HORIZON_STEPS-1 penuh."
+                )
+            col_stds = step_noise_profile.loc[depth_steps].values
+            noise = rng.normal(0.0, 1.0, size=(series.shape[0], n_noised_cols)) * col_stds[None, :]
+        else:
+            noise = rng.normal(0.0, noise_std, size=(series.shape[0], n_noised_cols))
         series[:, MIN_WINDOW_SIZE:] = series[:, MIN_WINDOW_SIZE:] + noise
 
         noised_feats = compute_window_features_matrix(series)
@@ -399,7 +461,8 @@ def evaluate(model, X_test, y_test):
     return {"mae": mae, "rmse": rmse, "r2": r2}
 
 
-def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_path=None):
+def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_path=None,
+                      step_noise_profile=None):
     """Fungsi utama: split (stratified monthly) -> [opsional noise injection
     ke train_df] -> train semua model di Config.MODEL_NAMES -> evaluasi dasar
     -> simpan model (.joblib) + ringkasan metrik (training_summary.csv) ke
@@ -412,18 +475,22 @@ def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_p
     models_dir : str, optional. Default None -> Config.EXPANDING_MODELS_DIR.
     test_frac : float, optional. Default None -> Config.TEST_FRAC.
     noise_std : float, default 0.0 (tidak ada noise -- perilaku lama,
-        backward-compatible). Kalau > 0, X_train (BUKAN X_test -- test set
-        harus tetap bersih/real biar evaluasi apple-to-apple) di-redesain
-        lewat inject_recursive_style_noise() -- lihat docstring fungsi itu
-        untuk alasan & desain lengkap.
+        backward-compatible). Kalau > 0 DAN `step_noise_profile` None,
+        X_train (BUKAN X_test) di-redesain pakai magnitude KONSTAN lewat
+        inject_recursive_style_noise() -- lihat docstring fungsi itu.
     cache_path : str, optional. WAJIB diisi (atau Config.EXPANDING_RAW_CACHE_FILE
-        dipakai) kalau noise_std > 0 -- dibutuhkan buat rekonstruksi window
-        mentah dari cache.
+        dipakai) kalau noise_std > 0 ATAU step_noise_profile diisi --
+        dibutuhkan buat rekonstruksi window mentah dari cache.
+    step_noise_profile : pd.Series, optional (default None). Kalau diisi,
+        noise per titik window jadi PER KEDALAMAN ROLLOUT (bukan konstan
+        `noise_std`) -- lihat `build_step_noise_profile()` &
+        `inject_recursive_style_noise()`.
 
     Return
     ------
     summary_df : pd.DataFrame, satu baris per model, kolom: model, n_train,
-        n_test, waktu_training_detik, mae, rmse, r2, noise_std.
+        n_test, waktu_training_detik, mae, rmse, r2, noise_std (isinya
+        "step_profile" -- bukan angka -- kalau step_noise_profile dipakai).
     """
     import os
     import joblib
@@ -436,7 +503,14 @@ def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_p
     say_info(f"Split selesai -- train: {len(train_df)} baris, test: {len(test_df)} baris "
              f"({len(cutoffs)} bulan).")
 
-    if noise_std > 0:
+    noise_std_label = noise_std
+    if step_noise_profile is not None:
+        train_df = inject_recursive_style_noise(
+            train_df, cache_path or Config.EXPANDING_RAW_CACHE_FILE, noise_std,
+            step_noise_profile=step_noise_profile,
+        )
+        noise_std_label = f"step_profile[{step_noise_profile.min():.2f}-{step_noise_profile.max():.2f}]"
+    elif noise_std > 0:
         train_df = inject_recursive_style_noise(
             train_df, cache_path or Config.EXPANDING_RAW_CACHE_FILE, noise_std,
         )
@@ -472,14 +546,14 @@ def train_all_models(df, models_dir=None, test_frac=None, noise_std=0.0, cache_p
                 "mae": metrics["mae"],
                 "rmse": metrics["rmse"],
                 "r2": metrics["r2"],
-                "noise_std": noise_std,
+                "noise_std": noise_std_label,
             })
         except ImportError as e:
             say_error(f"{model_name} dilewati -- library belum terinstall: {e}")
             summary_rows.append({
                 "model": model_name, "n_train": len(train_df), "n_test": len(test_df),
                 "waktu_training_detik": None, "mae": None, "rmse": None, "r2": None,
-                "noise_std": noise_std,
+                "noise_std": noise_std_label,
                 "error": f"Library belum terinstall: {e}",
             })
 

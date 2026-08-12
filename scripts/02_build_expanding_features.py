@@ -1,61 +1,74 @@
 # ./scripts/02_build_expanding_features.py
-# Tahap 2: scan semua file subset_*.nc di data_bandung/, generate dataset
-# training expanding window (fitur closed-form + gap-skip rule), simpan
-# sebagai CSV. Lihat CLAUDE.md §2-4 untuk metode, §12 untuk keputusan
-# desain dataset_builder.py.
 
 import argparse
+import os
 import time
 
-from ui.terminal_display import hr, gap, banner, say_info, say_ok, say_error
+from ui.terminal_display import (
+    hr,
+    gap,
+    banner,
+    say_info,
+    say_ok,
+    say_error,
+)
+
 from pipeline.config import load_config
-from pipeline.dataset_builder import build_dataset
+from pipeline.dataset_builder import (
+    discover_nc_files,
+    build_uniform_timeline,
+    load_pixel_grid,
+    save_raw_cache,
+)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Build dataset training expanding window dari file NetCDF Himawari."
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build raw temporal cache dari file NetCDF Himawari. "
+            "Tahap ini tidak membuat sliding-window features."
+        )
     )
-    p.add_argument(
-        "--data-dir", default=None,
-        help="Folder berisi file subset_*.nc. Default: Config.FINAL_BASE_DIR (data_bandung/).",
-    )
-    p.add_argument(
-        "--output", default=None,
-        help="Path output CSV. Default: Config.EXPANDING_DATASET_FILE.",
-    )
-    p.add_argument(
-        "--anchor-stride", type=int, default=None,
-        help="Jarak antar anchor. Default: Config.ANCHOR_STRIDE_DEFAULT (1).",
-    )
-    p.add_argument(
-        "--max-files", type=int, default=None,
+
+    parser.add_argument(
+        "--data-dir",
+        default=None,
         help=(
-            "SMOKE-TEST: cuma pakai N file pertama (kronologis), bukan full run. "
-            "WAJIB dicoba dulu sebelum full run tanpa flag ini -- lihat CLAUDE.md §11 "
-            "(pelajaran dari 03a_build_features.py yang makan 10 jam+ di repo lama "
-            "karena langsung full-run tanpa validasi subset). Contoh: --max-files 200."
+            "Folder berisi file subset_*.nc. "
+            "Default: Config.FINAL_BASE_DIR."
         ),
     )
-    p.add_argument(
-        "--no-cache", action="store_true",
+
+    parser.add_argument(
+        "--output",
+        default=None,
         help=(
-            "Skip nyimpen cache raw time series (.npz) yang dibutuhkan "
-            "04_recursive_evaluate.py. Default: cache DISIMPAN. Pakai flag ini "
-            "cuma buat smoke-test cepat yang nggak perlu lanjut ke recursive eval."
+            "Path output temporal cache (.npz). "
+            "Default: Config.EXPANDING_RAW_CACHE_FILE."
         ),
     )
-    p.add_argument(
-        "--workers", type=int, default=None,
+
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
         help=(
-            "Jumlah proses paralel untuk baca file NetCDF. Default: "
-            "Config.NETCDF_READ_WORKERS (semua core kecuali 1). Set --workers 1 "
-            "untuk fallback sekuensial murni (mis. debug, atau kalau I/O disk "
-            "sudah jadi bottleneck duluan sebelum CPU sehingga paralel tidak "
-            "nambah kecepatan)."
+            "SMOKE-TEST: hanya gunakan N file pertama secara kronologis. "
+            "Gunakan sebelum full run."
         ),
     )
-    return p.parse_args()
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Jumlah worker untuk membaca NetCDF. "
+            "Default: Config.NETCDF_READ_WORKERS."
+        ),
+    )
+
+    return parser.parse_args()
 
 
 def main():
@@ -63,48 +76,154 @@ def main():
     cfg = load_config()
 
     data_dir = args.data_dir or cfg.FINAL_BASE_DIR
-    output_path = args.output or cfg.EXPANDING_DATASET_FILE
+    output_path = args.output or cfg.EXPANDING_RAW_CACHE_FILE
 
-    banner("BUILD DATASET - EXPANDING WINDOW FEATURES")
-    say_info(f"Folder data   : {data_dir}")
-    say_info(f"Output CSV    : {output_path}")
-    say_info(f"Anchor stride : {args.anchor_stride or cfg.ANCHOR_STRIDE_DEFAULT}")
-    say_info(f"Workers baca  : {args.workers or cfg.NETCDF_READ_WORKERS}")
+    banner("BUILD TEMPORAL CACHE")
+
+    say_info(f"Folder data : {data_dir}")
+    say_info(f"Output      : {output_path}")
+    say_info(
+        f"Workers     : "
+        f"{args.workers or cfg.NETCDF_READ_WORKERS}"
+    )
+
     if args.max_files is not None:
-        say_info(f"Mode          : SMOKE-TEST, hanya {args.max_files} file pertama (kronologis)")
+        say_info(
+            f"Mode        : SMOKE-TEST ({args.max_files} file pertama)"
+        )
     else:
-        say_info("Mode          : FULL RUN (semua file) -- pastikan sudah smoke-test dulu dengan --max-files")
+        say_info("Mode        : FULL RUN")
+
     hr()
 
-    start = time.time()
+    start_time = time.time()
+
     try:
-        df = build_dataset(
-            data_dir=data_dir,
-            output_path=output_path,
-            anchor_stride=args.anchor_stride,
-            max_files=args.max_files,
-            cache_path=False if args.no_cache else None,
+        # ------------------------------------------------------------
+        # 1. Discover NetCDF files
+        # ------------------------------------------------------------
+        entries = discover_nc_files(data_dir)
+
+        if not entries:
+            raise ValueError(
+                f"Tidak ada file subset_*.nc ditemukan di: {data_dir}"
+            )
+
+        if args.max_files is not None:
+            if args.max_files < 1:
+                raise ValueError(
+                    "--max-files harus >= 1."
+                )
+
+            entries = entries[:args.max_files]
+
+        say_info(
+            f"File NetCDF yang diproses: {len(entries)}"
+        )
+
+        # ------------------------------------------------------------
+        # 2. Build uniform timeline
+        # ------------------------------------------------------------
+        timeline = build_uniform_timeline(
+            entries,
+            freq_minutes=cfg.FREQ_MINUTES,
+        )
+
+        say_info(
+            f"Timeline: {timeline[0]} → {timeline[-1]}"
+        )
+        say_info(
+            f"Jumlah timestep: {len(timeline)}"
+        )
+
+        # ------------------------------------------------------------
+        # 3. Load raw temporal matrix
+        #
+        # Shape:
+        #   T = timestep
+        #   P = pixel
+        # ------------------------------------------------------------
+        data_matrix, pixel_meta = load_pixel_grid(
+            entries,
+            timeline,
             n_workers=args.workers,
         )
-    except ValueError as e:
-        say_error(str(e))
-        return
-    elapsed = time.time() - start
 
-    gap()
-    banner("RINGKASAN")
-    say_info(f"Total baris        : {len(df)}")
-    say_info(f"Jumlah pixel unik  : {df['pixel_id'].nunique()}")
-    say_info(f"Jumlah anchor unik : {df.groupby('pixel_id')['anchor_t0'].nunique().sum()}")
-    say_info(f"Rentang waktu      : {df['anchor_t0'].min()} s/d {df['target_time'].max()}")
-    say_info(f"Waktu proses       : {elapsed:.1f} detik")
-    say_ok(f"Dataset disimpan ke: {output_path}")
+        say_info(
+            f"Data matrix shape: {data_matrix.shape}"
+        )
 
-    hr()
-    if args.max_files is not None:
-        say_info("Ini hasil smoke-test. Kalau hasilnya masuk akal, jalankan ulang TANPA --max-files untuk full run.")
-    else:
-        say_info("Lanjut ke Tahap 3: 03_train_models.py")
+        # ------------------------------------------------------------
+        # 4. Save raw temporal cache
+        # ------------------------------------------------------------
+        os.makedirs(
+            os.path.dirname(output_path),
+            exist_ok=True,
+        )
+
+        save_raw_cache(
+            output_path,
+            data_matrix,
+            timeline,
+            pixel_meta,
+        )
+
+        elapsed = time.time() - start_time
+
+        # ------------------------------------------------------------
+        # Summary
+        # ------------------------------------------------------------
+        gap()
+        banner("RINGKASAN")
+
+        say_info(
+            f"Timestep       : {data_matrix.shape[0]}"
+        )
+
+        say_info(
+            f"Pixel          : {data_matrix.shape[1]}"
+        )
+
+        say_info(
+            f"Timeline       : "
+            f"{timeline[0]} s/d {timeline[-1]}"
+        )
+
+        say_info(
+            f"Valid values   : "
+            f"{(~__import__('numpy').isnan(data_matrix)).sum():,}"
+        )
+
+        say_info(
+            f"NaN / gaps     : "
+            f"{__import__('numpy').isnan(data_matrix).sum():,}"
+        )
+
+        say_info(
+            f"Waktu proses   : {elapsed:.1f} detik"
+        )
+
+        say_ok(
+            f"Temporal cache disimpan ke: {output_path}"
+        )
+
+        hr()
+
+        if args.max_files is not None:
+            say_info(
+                "Ini adalah SMOKE-TEST. "
+                "Kalau hasilnya masuk akal, jalankan ulang "
+                "tanpa --max-files untuk full run."
+            )
+        else:
+            say_ok(
+                "Tahap 2 selesai. "
+                "Temporal cache siap digunakan oleh Tahap 3."
+            )
+
+    except Exception as exc:
+        say_error(str(exc))
+        raise
 
 
 if __name__ == "__main__":

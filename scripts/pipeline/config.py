@@ -1,13 +1,43 @@
 # ./scripts/pipeline/config.py
-# Menyediakan konfigurasi terpusat untuk seluruh pipeline, meliputi pengaturan FTP, direktori proyek, parameter pemrosesan, dan validasi variabel lingkungan (.env).
+#
+# Konfigurasi terpusat untuk seluruh pipeline CTT Forecasting.
+#
+# Perubahan desain eksperimen 2026-08:
+# - Stage 02 menghasilkan temporal cache (.npz)
+# - Stage 03 menggunakan chronological train/test split
+# - Train : Desember 2025 - Mei 2026
+# - Test  : Juni 2026 - Juli 2026
+# - Tidak menggunakan purge/embargo untuk split utama
+# - Window tidak lagi dikunci ke satu nilai.
+#   Kandidat window diuji per model pada tahap eksperimen.
+#
+# Catatan:
+# Konfigurasi lama yang masih diperlukan oleh download/inference/
+# visualization tetap dipertahankan agar pipeline lama tidak rusak.
 
 import os
+
 from dotenv import load_dotenv
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+# ============================================================================
+# PROJECT ROOT
+# ============================================================================
+
+SCRIPT_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(SCRIPT_DIR)
+)
+
+load_dotenv(
+    os.path.join(
+        PROJECT_ROOT,
+        ".env",
+    )
+)
 
 
 class Config:
@@ -15,301 +45,592 @@ class Config:
 
     PROJECT_ROOT = PROJECT_ROOT
 
-    # FTP Credentials
-    FTP_HOST = os.environ.get("FTP_HOST")
-    FTP_USER = os.environ.get("FTP_USER")
-    FTP_PASS = os.environ.get("FTP_PASS")
-    FTP_REMOTE_BASE = os.environ.get("FTP_REMOTE_DIR")
+    # =========================================================================
+    # FTP / DOWNLOAD
+    # =========================================================================
+
+    FTP_HOST = os.environ.get(
+        "FTP_HOST"
+    )
+
+    FTP_USER = os.environ.get(
+        "FTP_USER"
+    )
+
+    FTP_PASS = os.environ.get(
+        "FTP_PASS"
+    )
+
+    FTP_REMOTE_BASE = os.environ.get(
+        "FTP_REMOTE_DIR"
+    )
+
     FTP_TIMEOUT = 60
 
-    # Telegram notifikasi (opsional -- kalau kosong, notifikasi otomatis nonaktif)
-    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+    # =========================================================================
+    # TELEGRAM
+    # =========================================================================
 
-    # Filters
+    TELEGRAM_BOT_TOKEN = os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    )
+
+    TELEGRAM_CHAT_ID = os.environ.get(
+        "TELEGRAM_CHAT_ID"
+    )
+
+    # =========================================================================
+    # DOWNLOAD FILTER
+    # =========================================================================
+
     FILENAME_MUST_CONTAIN = os.environ.get(
-        "FILENAME_MUST_CONTAIN", "R21_FLDK.02801_02401"
+        "FILENAME_MUST_CONTAIN",
+        "R21_FLDK.02801_02401",
     ).strip()
 
-    # Paths
-    TEMP_FILE = os.path.join(PROJECT_ROOT, "temp_download.nc")
-    FINAL_BASE_DIR = os.path.join(PROJECT_ROOT, "data_bandung")
-    METADATA_BASE_DIR = os.path.join(PROJECT_ROOT, "_metadata")
-    LOG_FILE = os.path.join(PROJECT_ROOT, "download_activity.log")
+    # =========================================================================
+    # PATHS
+    # =========================================================================
 
-    # Retry
+    TEMP_FILE = os.path.join(
+        PROJECT_ROOT,
+        "temp_download.nc",
+    )
+
+    FINAL_BASE_DIR = os.path.join(
+        PROJECT_ROOT,
+        "data_bandung",
+    )
+
+    METADATA_BASE_DIR = os.path.join(
+        PROJECT_ROOT,
+        "_metadata",
+    )
+
+    LOG_FILE = os.path.join(
+        PROJECT_ROOT,
+        "download_activity.log",
+    )
+
+    # =========================================================================
+    # RETRY
+    # =========================================================================
+
     MAX_RETRY = 3
 
-    # Subset bounds (Bandung area)
+    # =========================================================================
+    # BANDUNG SUBSET
+    # =========================================================================
+
     BANDUNG_LAT_MIN = -7.0
     BANDUNG_LAT_MAX = -6.8
+
     BANDUNG_LON_MIN = 107.5
     BANDUNG_LON_MAX = 107.8
 
-    # Kanal infrared Himawari
-    TBB_CHANNELS = [f"tbb_{i:02d}" for i in range(7, 17)]  # tbb_07 ... tbb_16
+    # =========================================================================
+    # HIMAWARI CHANNELS
+    # =========================================================================
 
-    # Model ML yang dipakai di Tahap 4 (training), 5 (evaluasi recursive), 6 (inference).
-    # Ubah di sini saja kalau mau menambah/mengurangi model -- otomatis konsisten di ketiganya.
-    MODEL_NAMES = ["xgboost", "lightgbm", "catboost"]
+    TBB_CHANNELS = [
+        f"tbb_{i:02d}"
+        for i in range(7, 17)
+    ]
 
-    # Interval prediksi (menit) yang dipakai di Tahap 3a, 3b, 4, 5.
-    INTERVALS_MINUTES = [10, 30, 60]
+    # =========================================================================
+    # MACHINE LEARNING MODELS
+    # =========================================================================
+    #
+    # Model yang digunakan dalam eksperimen:
+    #   XGBoost
+    #   LightGBM
+    #   CatBoost
+    #
+    # Ubah daftar ini di satu tempat agar training/evaluasi konsisten.
 
-    # Jumlah lag (window observasi) yang dipakai sebagai fitur -- SEBELUMNYA 3
-    # (t, tm1, tm2). Dipakai di Tahap 3a (bangun kolom lag), model_training.py
-    # (FEATURE_COLUMNS) dan inference.py (window recursive forecast). Ubah di
-    # sini SAJA -- otomatis konsisten di semua tahap. PENTING: mengubah nilai
-    # ini mengubah skema kolom CSV di dataset/features_*min.csv (kolom
-    # tbb_13_tm3, tm4, ... baru), jadi WAJIB jalankan
-    # `03a_build_features.py --rebuild` (bukan mode incremental) setelah
-    # mengubah nilai ini, atau tahap-tahap berikutnya akan gagal/tidak
-    # konsisten dengan CSV lama.
+    MODEL_NAMES = [
+        "xgboost",
+        "lightgbm",
+        "catboost",
+    ]
+
+    # =========================================================================
+    # LEGACY INTERVAL CONFIGURATION
+    # =========================================================================
+    #
+    # Dipertahankan untuk kompatibilitas dengan script lama.
+    #
+    # Pipeline eksperimen temporal baru menggunakan timeline 10 menit
+    # dan horizon 18 step.
+
+    INTERVALS_MINUTES = [
+        10,
+        30,
+        60,
+    ]
+
+    # =========================================================================
+    # LEGACY LAG CONFIGURATION
+    # =========================================================================
+    #
+    # Ini bukan konfigurasi utama untuk eksperimen temporal baru.
+    # Dipertahankan agar modul lama yang masih menggunakan LAG_COUNT
+    # tidak langsung rusak.
+    #
+    # Stage 02 baru TIDAK membangun CSV lag dari konfigurasi ini.
+
     LAG_COUNT = 6
-    assert LAG_COUNT >= 3, "LAG_COUNT minimal 3 -- fitur delta/accel butuh tbb_13_t/tm1/tm2."
 
-    # ------------------------------------------------------------------
-    # Konfigurasi khusus EXPANDING WINDOW (project ini -- lihat CLAUDE.md
-    # §2-3, §12). Dipakai oleh expanding_features.py & dataset_builder.py.
-    # Beda dari LAG_COUNT/INTERVALS_MINUTES di atas yang merupakan skema
-    # fixed sliding window punya repo lama (dibiarkan ada di sini kalau ada
-    # script yang di-reuse apa adanya, tapi TIDAK dipakai expanding window).
-    # ------------------------------------------------------------------
+    assert LAG_COUNT >= 3, (
+        "LAG_COUNT minimal 3 untuk kompatibilitas "
+        "dengan fitur delta/acceleration pada pipeline lama."
+    )
 
-    # Channel target satu-satunya yang dipakai sebagai time series `y`
-    # untuk window expanding. TIDAK multi-channel -- lihat CLAUDE.md §8.
+    # =========================================================================
+    # EXPERIMENTAL TEMPORAL CONFIGURATION
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # Target
+    # -------------------------------------------------------------------------
+
+    # Target utama adalah Brightness Temperature channel 13.
     TARGET_CHANNEL = "tbb_13"
 
-    # Ukuran window awal (IS1 = 6 titik) & jumlah step horizon (OS1..OS18).
-    # Ubah di sini SAJA kalau mau ubah skema window -- otomatis konsisten
-    # di dataset_builder.py. PENTING: mengubah nilai ini mengubah definisi
-    # anchor span (rentang wajib bebas-gap untuk gap-skip rule §4) dan
-    # jumlah sample per anchor, jadi dataset hasil build_dataset() yang
-    # lama harus di-rebuild ulang setelah diubah.
-    MIN_WINDOW_SIZE = 6
-    HORIZON_STEPS = 18
-    assert MIN_WINDOW_SIZE >= 2, (
-        "MIN_WINDOW_SIZE minimal 2 -- window IS1 butuh >=2 titik supaya slope "
-        "(regresi linear y~t) punya varians waktu (t) yang tidak nol. Kalau "
-        "cuma 1 titik, denom OLS = 0 dan slope diam-diam fallback ke 0 "
-        "(lihat expanding_features.compute_expanding_window_features)."
-    )
-    assert HORIZON_STEPS >= 1, "HORIZON_STEPS minimal 1 -- expanding window recursive butuh minimal 1 step horizon."
+    # -------------------------------------------------------------------------
+    # Temporal resolution
+    # -------------------------------------------------------------------------
 
-    # Rentang total 1 anchor: dari titik pertama window (anchor_t0) sampai
-    # target step HORIZON_STEPS, inklusif. Definisi identik dengan yang
-    # sebelumnya cuma dihitung lokal di dataset_builder.py -- disentralkan ke
-    # sini (satu sumber kebenaran) karena sekarang DIPAKAI JUGA oleh
-    # model_training.py (lihat PURGE_STEPS di bawah, untuk purge/embargo
-    # stratified_monthly_split() -- lihat investigasi temporal leakage sesi
-    # ini). dataset_builder.py tetap jadi tempat definisi ANCHOR_SPAN dipakai
-    # (gap-skip rule §4), tapi nilainya sekarang diturunkan dari sini.
-    ANCHOR_SPAN = MIN_WINDOW_SIZE + HORIZON_STEPS
-
-    # Purge/embargo (satuan tick FREQ_MINUTES) yang WAJIB di-drop dari train,
-    # di stratified_monthly_split(). KENAPA: window training untuk step
-    # manapun (sampai HORIZON_STEPS) bisa menjangkau sampai ANCHOR_SPAN-1
-    # titik ke depan dari anchor_t0-nya sendiri -- kalau anchor_t0 train
-    # terlalu dekat ke cutoff, window/target row itu bisa menyentuh raw
-    # observasi yang SECARA WAKTU sudah masuk wilayah test (bahkan bisa jadi
-    # nilai yang sama persis dipakai sebagai target test row lain -- temporal
-    # leakage). PURGE_STEPS = ANCHOR_SPAN-1 adalah batas konservatif.
-    #
-    # DUA SISI diterapkan (lihat docstring lengkap stratified_monthly_split()
-    # di model_training.py untuk detail & alasan tiap sisi ditemukan):
-    # 1. SEBELUM cutoff tiap bulan: anchor dgn `anchor_t0 < cutoff_time -
-    #    PURGE_STEPS*FREQ_MINUTES` di-drop dari train bulan itu.
-    # 2. SETELAH anchor test terakhir tiap bulan: anchor MANAPUN (bisa bulan
-    #    berikutnya) dgn `anchor_t0` dalam PURGE_STEPS*FREQ_MINUTES menit
-    #    setelah anchor test terakhir bulan sebelumnya JUGA di-drop --
-    #    ditemukan lewat validasi (bukan cuma teori) bahwa anchor test akhir
-    #    bulan bisa punya target yang menjorok ke bulan berikutnya, dan
-    #    window training di awal bulan berikutnya bisa berbagi raw value
-    #    dengan target itu kalau sisi ini tidak ada.
-    #
-    # Kedua sisi menjamin window/target train (step manapun) tidak pernah
-    # menyentuh index >= cutoff bulan manapun. Test set TIDAK terpengaruh oleh
-    # ini (tetap anchor_t0 >= cutoff_time, lihat model_training.py).
-    PURGE_STEPS = ANCHOR_SPAN - 1
-
-    # Resolusi timeline data Himawari (menit). Dipakai dataset_builder.py
-    # buat bangun timeline uniform. Ubah di sini SAJA kalau sumber data
-    # berubah resolusi -- jangan hardcode di fungsi manapun.
+    # Himawari data yang digunakan memiliki interval 10 menit.
     FREQ_MINUTES = 10
 
-    # Direktori & nama file default output dataset training expanding window.
-    EXPANDING_DATASET_DIR = os.path.join(PROJECT_ROOT, "dataset")
-    EXPANDING_DATASET_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_features.csv")
+    # -------------------------------------------------------------------------
+    # Forecast horizon
+    # -------------------------------------------------------------------------
+    #
+    # 18 step × 10 menit = 180 menit = 3 jam.
 
-    # Cache raw time series (data_matrix + timeline + pixel_meta) hasil baca
-    # NetCDF di 02_build_expanding_features.py. Disimpan sekali di sini biar
-    # 04_recursive_evaluate.py TIDAK perlu baca ulang 34rb+ file .nc (yang
-    # makan ~12.5 jam I/O -- lihat catatan performa sesi ini) buat dapetin
-    # nilai mentah tbb_13 per titik. Format .npz (numpy compressed).
-    EXPANDING_RAW_CACHE_FILE = os.path.join(EXPANDING_DATASET_DIR, "expanding_raw_cache.npz")
+    HORIZON_STEPS = 18
 
-    # Direktori & file output evaluasi recursive (Tahap 5 / 04_recursive_evaluate.py).
-    # recursive_evaluation.csv = detail per (model, pixel_id, anchor_t0, step).
-    # recursive_mae_summary.csv = ringkasan MAE (+ std prediksi vs std observasi
-    # asli, buat ngecek spatial collapse) per (model, step). Format ini SENGAJA
-    # dibuat gampang di-extend kolom (mis. reliability calibration) belakangan
-    # tanpa re-arsitektur, sesuai CLAUDE.md §7.
-    EXPANDING_EVAL_DIR = os.path.join(PROJECT_ROOT, "evaluation")
-    RECURSIVE_EVAL_DETAIL_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_evaluation.csv")
-    RECURSIVE_EVAL_SUMMARY_FILE = os.path.join(EXPANDING_EVAL_DIR, "recursive_mae_summary.csv")
+    assert HORIZON_STEPS >= 1, (
+        "HORIZON_STEPS minimal 1."
+    )
 
-    # Subfolder KHUSUS output scripts/tools/sweep_damping.py &
-    # sweep_noise_std.py -- dipisah dari EXPANDING_EVAL_DIR (yang cuma buat
-    # output RESMI 04_recursive_evaluate.py) supaya evaluation/ nggak
-    # kecampur belasan file per-faktor/per-nilai sweep, gampang dibedain
-    # mana hasil Stage 04 "official" vs mana hasil eksperimen tuning.
-    # BUKAN folder-per-run (beda dari forecast_output/visualizations) --
-    # sengaja DITIMPA tiap sweep dijalankan ulang, TANPA retensi.
-    DAMPING_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_damping")
-    NOISE_STD_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_noise_std")
-    STEP_NOISE_SWEEP_DIR = os.path.join(EXPANDING_EVAL_DIR, "sweep_step_noise")
+    # -------------------------------------------------------------------------
+    # Candidate observation windows
+    # -------------------------------------------------------------------------
+    #
+    # Sebelumnya seluruh model dipaksa menggunakan:
+    #
+    #     window = 6
+    #
+    # Sekarang window menjadi hyperparameter eksperimen.
+    #
+    # Setiap model akan diuji dengan kandidat window yang sama:
+    #
+    #     3 step  = 30 menit
+    #     6 step  = 60 menit
+    #     12 step = 120 menit
+    #     18 step = 180 menit
+    #
+    # Window terbaik ditentukan berdasarkan performa validasi/training
+    # yang sesuai dengan desain eksperimen.
+    #
+    # Nilai ini TIDAK berarti semua window dipakai bersamaan.
 
-    # Model per nilai scale scripts/tools/sweep_step_noise_scale.py --
-    # TERPISAH dari EXPANDING_MODELS_DIR (produksi) & NOISE_SWEEP_MODELS_DIR
-    # (sweep noise_std konstan), pola sama: TIDAK PERNAH menimpa produksi.
-    STEP_NOISE_SWEEP_MODELS_DIR = os.path.join(PROJECT_ROOT, "models_step_noise_sweep")
+    WINDOW_CANDIDATES = [
+        1, 2, 3, 4, 5, 6,
+        7, 8, 9, 10, 11, 12,
+        13, 14, 15, 16, 17, 18,
+    ]
 
-    # Direktori output model hasil training (Tahap 3) & ringkasan metrik.
-    # Dipakai model_training.py / 03_train_models.py. Path model per-model:
-    # {EXPANDING_MODELS_DIR}/{model_name}.joblib. Ringkasan metrik gabungan:
-    # {EXPANDING_MODELS_DIR}/training_summary.csv
-    EXPANDING_MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+    assert len(WINDOW_CANDIDATES) > 0, (
+        "WINDOW_CANDIDATES tidak boleh kosong."
+    )
 
-    # Fraksi test default untuk stratified_monthly_split() di Tahap 3.
-    TEST_FRAC = 0.15
+    assert len(
+        set(WINDOW_CANDIDATES)
+    ) == len(WINDOW_CANDIDATES), (
+        "WINDOW_CANDIDATES tidak boleh memiliki duplikat."
+    )
 
-    # Direktori dasar buat scripts/tools/sweep_noise_std.py -- tiap nilai
-    # noise_std yang di-sweep dapet subfolder SENDIRI (noise{XXX}/) berisi
-    # model .joblib + training_summary.csv, TERPISAH dari EXPANDING_MODELS_DIR
-    # produksi (sweep TIDAK PERNAH menimpa model produksi yang lagi dipakai).
-    NOISE_SWEEP_MODELS_DIR = os.path.join(PROJECT_ROOT, "models_noise_sweep")
+    assert all(
+        isinstance(w, int) and w >= 1
+        for w in WINDOW_CANDIDATES
+    ), (
+        "Setiap window harus integer >= 1."
+    )
 
-    # ------------------------------------------------------------------
-    # Konfigurasi khusus INFERENCE (Tahap 6 / 05_run_inference.py). Baca
-    # file .nc TERBARU di FINAL_BASE_DIR (data_bandung/) langsung -- BUKAN
-    # fetch FTP baru, BUKAN pakai EXPANDING_RAW_CACHE_FILE (cache itu
-    # snapshot dataset training, bukan data real-time terbaru). Lihat
-    # pipeline/inference.py.
-    # ------------------------------------------------------------------
+    assert HORIZON_STEPS >= max(
+        WINDOW_CANDIDATES
+    ) or HORIZON_STEPS > 0, (
+        "Konfigurasi horizon/window tidak valid."
+    )
 
-    # Jumlah file .nc TERAKHIR (kronologis, bukan random) yang dibaca dari
-    # FINAL_BASE_DIR untuk cari window observasi terbaru per pixel (atau
-    # window di sekitar --t0 kalau dioverride, lihat inference.py). WAJIB
-    # slice SEBELUM dilempar ke build_uniform_timeline()/load_pixel_grid()
-    # -- 2 fungsi itu baca SEMUA entries yang dikasih tanpa filter internal
-    # apapun, dan data_bandung/ berisi puluhan ribu file historis (lupa
-    # slice = re-trigger bottleneck I/O berjam-jam, lihat CLAUDE.md §16).
-    # 100 file = ~16,7 jam cakupan (10 menit/file) -- cukup toleran untuk
-    # pixel yang cloud-covered berjam-jam (MIN_WINDOW_SIZE=6 titik/50 menit
-    # bebas-NaN dicari mundur dari file terbaru/--t0), sementara biaya baca
-    # tetap murah (puluhan detik, jauh di bawah baca seluruh riwayat).
-    # Naikkan lewat --tail-files kalau operasional nunjukkin banyak pixel
-    # ke-skip.
-    INFERENCE_TAIL_FILES = 100
+    # -------------------------------------------------------------------------
+    # Chronological train/test split
+    # -------------------------------------------------------------------------
+    #
+    # Sesuai desain eksperimen berdasarkan PPT:
+    #
+    # TRAIN:
+    #   2025-12-01 -> 2026-05-31
+    #
+    # TEST:
+    #   2026-06-01 -> 2026-07-31
+    #
+    # Tidak menggunakan stratified monthly split.
+    # Tidak menggunakan purge.
+    # Tidak menggunakan embargo.
+    #
+    # Alasan metodologis:
+    # seluruh informasi temporal yang digunakan model berasal dari periode
+    # sebelum test. Test benar-benar merupakan periode masa depan relatif
+    # terhadap training.
 
-    # Rentang step (inklusif) yang dipakai select_inference_model() buat
-    # milih model production OTOMATIS dari evaluation/recursive_mae_summary.csv
-    # (hasil 04_recursive_evaluate.py) -- BUKAN dihardcode nama modelnya di
-    # sini, karena model terbaik bisa berubah tiap kali dataset/training
-    # berubah. Range (12, 18) = prioritas horizon panjang, sesuai kesimpulan
-    # final CLAUDE.md §18.9: metode rekursif bikin error terakumulasi paling
-    # signifikan di step-step akhir -- itu ujian utama kualitas model,
-    # bukan step awal yang secara inheren lebih gampang diprediksi (window
-    # masih didominasi observasi real).
-    INFERENCE_PRIORITY_STEP_RANGE = (12, 18)
+    TRAIN_START = "2025-12-01 00:00:00"
+    TRAIN_END = "2026-05-31 23:59:59"
 
-    # Direktori output forecast (Tahap 6). SUDAH ada di .gitignore
-    # (forecast_output/) -- riwayat run TIDAK di-commit, tapi TETAP
-    # disimpan lokal sbg 1 FOLDER per run (nama folder timestamped + nama
-    # model, pola sama dgn visualizations/ di Tahap 7, BUKAN overwrite
-    # "latest") supaya bisa diaudit/dibandingkan lintas run.
-    INFERENCE_DIR = os.path.join(PROJECT_ROOT, "forecast_output")
+    TEST_START = "2026-06-01 00:00:00"
+    TEST_END = "2026-07-31 23:59:59"
 
-    # ------------------------------------------------------------------
-    # Konfigurasi khusus VISUALISASI (Tahap 7 / 06_visualize.py). Render
-    # CSV forecast Tahap 6 jadi animasi GIF 6-panel (semua panel = peta
-    # spasial pakai lat/lon asli) per step. Lihat pipeline/visualize.py.
-    # ------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Temporal split output
+    # -------------------------------------------------------------------------
 
-    # Dimensi grid pixel Bandung (lat_idx 0-4, lon_idx 0-6) -- FIXED,
-    # sesuai subset area download (lihat CLAUDE.md §12 "Definisi pixel":
-    # grid ~5x7=35 pixel). Dipakai visualize.py buat reshape long-format
-    # CSV -> array 2D siap imshow. TIDAK diturunkan otomatis dari data CSV
-    # (max lat_idx/lon_idx yang HADIR) karena Stage 05 bisa skip pixel
-    # tepi grid kalau gagal gap-check -- kalau diturunkan dari data, grid
-    # bisa "menyusut" diam-diam dan salah tafsir sbg ukuran domain berubah.
-    PIXEL_GRID_SHAPE = (5, 7)
+    TEMPORAL_SPLIT_DIR = os.path.join(
+        PROJECT_ROOT,
+        "dataset",
+        "temporal_split",
+    )
 
-    # Threshold TBB (Kelvin) buat klasifikasi 3 kelas risk_banjir/kelas_awan
-    # (SAMA PERSIS dipakai kedua panel, cuma label beda -- lihat
-    # visualize.classify_tbb_grid()). TBB rendah = puncak awan
-    # tinggi/dingin = konveksi kuat = risiko hujan lebat/banjir.
-    TBB_RISK_THRESHOLDS = (200.0, 270.0)
+    TEMPORAL_TRAIN_FILE = os.path.join(
+        TEMPORAL_SPLIT_DIR,
+        "train_temporal.npz",
+    )
 
-    # Direktori output visualisasi (Tahap 7). Sudah ada di .gitignore.
-    VISUALIZATION_DIR = os.path.join(PROJECT_ROOT, "visualizations")
+    TEMPORAL_TEST_FILE = os.path.join(
+        TEMPORAL_SPLIT_DIR,
+        "test_temporal.npz",
+    )
 
-    # Durasi tiap frame GIF (ms). 600ms/frame -> total ~10.8s utk 18
-    # step, cukup lambat dibaca tapi tidak terlalu lama nunggu 1 putaran.
-    VISUALIZATION_FRAME_DURATION_MS = 600
+    TEMPORAL_SPLIT_METADATA_FILE = os.path.join(
+        TEMPORAL_SPLIT_DIR,
+        "split_metadata.json",
+    )
 
-    # Path GeoJSON batas kecamatan Kota Bandung, dipakai sbg overlay
-    # opsional di tiap panel peta (garis tipis, murni referensi visual --
-    # BUKAN dipakai buat join/agregasi data apapun, sekadar konteks
-    # geografis). Sama CRS dgn pixel grid (lat/lon derajat WGS84 polos),
-    # jadi align langsung tanpa transformasi. Kalau file tidak
-    # ada/gagal di-parse, overlay di-skip diam-diam (fitur pelengkap,
-    # bukan wajib) -- lihat visualize.load_kecamatan_boundaries().
-    KOTA_BANDUNG_GEOJSON = os.path.join(PROJECT_ROOT, "scripts", "geojson", "KotaBandung.geojson")
+    # =========================================================================
+    # LEGACY EXPANDING DATASET PATHS
+    # =========================================================================
+    #
+    # Dipertahankan sementara karena beberapa script lama masih merujuk
+    # ke path ini.
+    #
+    # Dataset CSV expanding window TIDAK lagi menjadi output Stage 02 baru.
 
-    # Direktori output ringkasan presentasi (scripts/tools/generate_summary_report.py)
-    # -- agregat Stage 02-05 (statistik dataset, perbandingan model, MAE/metrik
-    # spasial per step, contoh forecast) jadi tabel Markdown + chart PNG siap
-    # dipakai bahan PPT. Folder-per-run (pola SAMA PERSIS dgn INFERENCE_DIR/
-    # VISUALIZATION_DIR): {model}_t0..._run.../ -- identitas run forecast Stage
-    # 05 yang dipilih via menu CLI, SENGAJA idempotent (re-generate dari run
-    # forecast yang SAMA overwrite folder yang sama, run BEDA bikin folder baru).
-    SUMMARY_REPORT_DIR = os.path.join(PROJECT_ROOT, "summary_report")
+    EXPANDING_DATASET_DIR = os.path.join(
+        PROJECT_ROOT,
+        "dataset",
+    )
 
-    # Jarak antar anchor (stride) default di dataset_builder.build_dataset().
-    # 1 = semua posisi start valid dipakai (data maksimal, tapi overlap
-    # tinggi antar anchor bersebelahan). Naikkan kalau dataset full run
-    # ternyata kegedean -- lihat CLAUDE.md §12.
+    EXPANDING_DATASET_FILE = os.path.join(
+        EXPANDING_DATASET_DIR,
+        "expanding_features.csv",
+    )
+
+    # =========================================================================
+    # TEMPORAL RAW CACHE
+    # =========================================================================
+    #
+    # Output utama Stage 02:
+    #
+    #   data_matrix
+    #   timeline_ns
+    #   pixel_id
+    #   lat_idx
+    #   lon_idx
+    #   latitude
+    #   longitude
+    #
+    # Shape aktual full run lu:
+    #
+    #   (34989, 35)
+    #
+    # Cache ini digunakan agar tahap berikutnya tidak perlu membaca
+    # 34.420 file NetCDF lagi.
+
+    EXPANDING_RAW_CACHE_FILE = os.path.join(
+        EXPANDING_DATASET_DIR,
+        "expanding_raw_cache.npz",
+    )
+
+    # =========================================================================
+    # EXPANDING / DATASET LEGACY COMPATIBILITY
+    # =========================================================================
+    #
+    # Jangan digunakan oleh chronological experiment baru.
+    #
+    # Dibiarkan sebagai compatibility layer karena dataset_builder.py
+    # lama masih mengakses parameter ini.
+    #
+    # Setelah seluruh pipeline baru selesai dirombak, parameter ini dapat
+    # dihapus bersama dataset_builder.py legacy.
+
     ANCHOR_STRIDE_DEFAULT = 1
 
-    # Jumlah proses paralel default untuk baca file NetCDF di
-    # dataset_builder.load_pixel_grid() (Tahap 2). Bottleneck sebelumnya:
-    # loop sekuensial 34.420 file makan ~12.5 jam (I/O/parse-bound, bukan
-    # compute -- lihat CLAUDE.md §10 poin 4). Default: semua core kecuali 1
-    # (biar OS/proses lain tetap responsif). Override lewat --workers di
-    # 02_build_expanding_features.py atau param n_workers eksplisit kalau
-    # mau tuning (mis. workers lebih dikit kalau I/O disk jadi bottleneck
-    # duluan sebelum CPU, bukan sebaliknya).
-    NETCDF_READ_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+    # -------------------------------------------------------------------------
+    # LEGACY MODEL DATASET PARAMETERS
+    # -------------------------------------------------------------------------
+
+    # TEST_FRAC tidak digunakan pada chronological split baru.
+    #
+    # Tetap dipertahankan agar script lama tidak error jika masih mengakses
+    # Config.TEST_FRAC.
+
+    TEST_FRAC = 0.15
+
+    # -------------------------------------------------------------------------
+    # Legacy anchor values
+    # -------------------------------------------------------------------------
+    #
+    # JANGAN digunakan oleh eksperimen baru.
+    #
+    # Hanya compatibility sementara dengan dataset_builder.py dan modul
+    # lama yang belum kita hapus.
+    #
+    # Penting:
+    # nilai ini TIDAK menentukan WINDOW_CANDIDATES.
+
+    LEGACY_MIN_WINDOW_SIZE = 6
+
+    # Tidak lagi digunakan untuk split baru.
+    #
+    # Sengaja TIDAK membuat:
+    #
+    #     ANCHOR_SPAN
+    #     PURGE_STEPS
+    #
+    # sebagai parameter eksperimen baru.
+    #
+    # Kalau modul legacy masih mencoba mengakses Config.MIN_WINDOW_SIZE
+    # atau Config.PURGE_STEPS, modul tersebut harus diperbaiki/dihapus
+    # pada tahap refactor berikutnya.
+
+    # =========================================================================
+    # RAW NETCDF READING
+    # =========================================================================
+
+    # Jumlah worker untuk Stage 02.
+    #
+    # os.cpu_count() - 1 dipakai agar satu core tetap tersedia untuk
+    # sistem operasi / proses lain.
+    #
+    # Pada mesin lu sebelumnya 7 worker memberikan hasil:
+    #
+    #   34,419 file -> ~142.9 detik
+    #
+    # sehingga konfigurasi ini sudah terbukti bekerja dengan baik.
+
+    NETCDF_READ_WORKERS = max(
+        1,
+        (os.cpu_count() or 4) - 1,
+    )
+
+    # =========================================================================
+    # MODEL OUTPUT
+    # =========================================================================
+
+    EXPANDING_MODELS_DIR = os.path.join(
+        PROJECT_ROOT,
+        "models",
+    )
+
+    # =========================================================================
+    # NOISE SWEEP
+    # =========================================================================
+    #
+    # Masih dipertahankan karena belum kita rombak.
+    # Jangan digunakan dalam eksperimen utama sampai desain training baru
+    # selesai.
+
+    NOISE_SWEEP_MODELS_DIR = os.path.join(
+        PROJECT_ROOT,
+        "models_noise_sweep",
+    )
+
+    STEP_NOISE_SWEEP_MODELS_DIR = os.path.join(
+        PROJECT_ROOT,
+        "models_step_noise_sweep",
+    )
+
+    # =========================================================================
+    # EVALUATION
+    # =========================================================================
+
+    EXPANDING_EVAL_DIR = os.path.join(
+        PROJECT_ROOT,
+        "evaluation",
+    )
+
+    RECURSIVE_EVAL_DETAIL_FILE = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "recursive_evaluation.csv",
+    )
+
+    RECURSIVE_EVAL_SUMMARY_FILE = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "recursive_mae_summary.csv",
+    )
+
+    # =========================================================================
+    # EXPERIMENTAL SWEEP OUTPUTS
+    # =========================================================================
+
+    DAMPING_SWEEP_DIR = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "sweep_damping",
+    )
+
+    NOISE_STD_SWEEP_DIR = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "sweep_noise_std",
+    )
+
+    STEP_NOISE_SWEEP_DIR = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "sweep_step_noise",
+    )
+
+    # =========================================================================
+    # INFERENCE
+    # =========================================================================
+
+    # Jumlah file NetCDF terakhir yang dibaca saat inference.
+    #
+    # Ini sengaja tetap kecil agar inference tidak membaca seluruh
+    # 34.420 file historis.
+
+    INFERENCE_TAIL_FILES = 100
+
+    # Prioritas evaluasi untuk pemilihan model production.
+    INFERENCE_PRIORITY_STEP_RANGE = (
+        12,
+        18,
+    )
+
+    # Output forecast.
+    INFERENCE_DIR = os.path.join(
+        PROJECT_ROOT,
+        "forecast_output",
+    )
+
+    # =========================================================================
+    # VISUALIZATION
+    # =========================================================================
+
+    # Grid Bandung:
+    #
+    # latitude  = 5
+    # longitude = 7
+    # total     = 35 pixel
+
+    PIXEL_GRID_SHAPE = (
+        5,
+        7,
+    )
+
+    # Threshold TBB untuk klasifikasi visual.
+    TBB_RISK_THRESHOLDS = (
+        200.0,
+        270.0,
+    )
+
+    VISUALIZATION_DIR = os.path.join(
+        PROJECT_ROOT,
+        "visualizations",
+    )
+
+    VISUALIZATION_FRAME_DURATION_MS = 600
+
+    KOTA_BANDUNG_GEOJSON = os.path.join(
+        PROJECT_ROOT,
+        "scripts",
+        "geojson",
+        "KotaBandung.geojson",
+    )
+
+    # =========================================================================
+    # SUMMARY REPORT
+    # =========================================================================
+
+    SUMMARY_REPORT_DIR = os.path.join(
+        PROJECT_ROOT,
+        "summary_report",
+    )
+
+    # =========================================================================
+    # INFERENCE / MODEL SELECTION
+    # =========================================================================
+
+    # Nilai ini digunakan oleh pipeline inference lama.
+    # Dipertahankan supaya modul inference tidak rusak.
+
+    INFERENCE_MODEL_SELECTION = (
+        "evaluation"
+    )
+
+    # =========================================================================
+    # VALIDATION
+    # =========================================================================
 
     @classmethod
     def validate(cls):
-        """Validasi semua env var wajib terisi, dan laporkan nama-nama yang belum diisi."""
+        """
+        Validasi environment variable yang diperlukan oleh pipeline
+        download.
+
+        Tidak memvalidasi FTP untuk tahap lokal seperti Stage 02/03 karena
+        tahap tersebut tidak membutuhkan koneksi FTP.
+        """
+
         required = [
-            ("FTP_HOST", cls.FTP_HOST),
-            ("FTP_USER", cls.FTP_USER),
-            ("FTP_PASS", cls.FTP_PASS),
-            ("FTP_REMOTE_DIR", cls.FTP_REMOTE_BASE),
+            (
+                "FTP_HOST",
+                cls.FTP_HOST,
+            ),
+            (
+                "FTP_USER",
+                cls.FTP_USER,
+            ),
+            (
+                "FTP_PASS",
+                cls.FTP_PASS,
+            ),
+            (
+                "FTP_REMOTE_DIR",
+                cls.FTP_REMOTE_BASE,
+            ),
         ]
-        missing = [name for name, val in required if not val]
+
+        missing = [
+            name
+            for name, value in required
+            if not value
+        ]
+
         if missing:
             raise SystemExit(
-                f"ERROR: variabel .env berikut belum diset: {', '.join(missing)}.\n"
-                "Salin .env.example menjadi .env lalu isi kredensialnya."
+                "ERROR: variabel .env berikut belum diset: "
+                + ", ".join(missing)
+                + ".\n"
+                "Salin .env.example menjadi .env "
+                "lalu isi kredensialnya."
             )
 
 
 def load_config():
-    """Load and validate configuration."""
+    """
+    Load and validate configuration.
+    """
     Config.validate()
     return Config

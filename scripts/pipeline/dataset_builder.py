@@ -53,10 +53,16 @@ TARGET_COLUMN = f"target_{TARGET_CHANNEL}"
 # CONFIG WINDOW
 # ============================================================
 
-MIN_WINDOW_SIZE = Config.MIN_WINDOW_SIZE
+MIN_WINDOW_SIZE = Config.LEGACY_MIN_WINDOW_SIZE
 HORIZON_STEPS = Config.HORIZON_STEPS
 
-ANCHOR_SPAN = Config.ANCHOR_SPAN
+# ANCHOR_SPAN sengaja TIDAK lagi disediakan Config (dihapus saat config.py
+# dirombak ke metode chronological, lihat komentar
+# Config.LEGACY_MIN_WINDOW_SIZE) -- direkonstruksi lokal di sini persis
+# formula lama: window + horizon (mis. MIN_WINDOW_SIZE=6, HORIZON_STEPS=18
+# -> ANCHOR_SPAN=24, cocok dengan komentar lama di model_training.py
+# "230 menit = ANCHOR_SPAN-1 titik" = 23*10menit, ANCHOR_SPAN=24).
+ANCHOR_SPAN = MIN_WINDOW_SIZE + HORIZON_STEPS
 
 WINDOW_OFFSET = MIN_WINDOW_SIZE - 2
 

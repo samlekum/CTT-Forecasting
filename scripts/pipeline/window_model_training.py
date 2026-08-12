@@ -11,7 +11,10 @@
 # hyperparameter yang SAMA (di-reuse konsepnya, bukan importnya) dengan
 # versi lama supaya perbandingan hasil tetap adil.
 
+import json
+import os
 import time
+import warnings
 
 import numpy as np
 
@@ -112,17 +115,30 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
 
     predictions = np.zeros((n_anchors, horizon_steps), dtype=np.float64)
 
-    for step in range(horizon_steps):
-        pred = np.asarray(model.predict(window_state), dtype=np.float64)
-
-        predictions[:, step] = pred
-
-        # geser window: prediksi baru jadi lag_1, sisanya geser ke kanan,
-        # lag_w yang paling lama dibuang.
-        window_state = np.concatenate(
-            [pred.reshape(-1, 1), window_state[:, :-1]],
-            axis=1,
+    # Suppress "X does not have valid feature names, but LGBMRegressor was
+    # fitted with feature names" (sklearn/LightGBM UserWarning, kosmetik --
+    # cuma noise di terminal, TIDAK mempengaruhi hasil prediksi. Muncul
+    # karena window_state di sini numpy array polos hasil geser-window per
+    # step, bukan DataFrame). Scoped di block ini SAJA (bukan global) biar
+    # warning lain yang mungkin penting tetap keliatan.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="X does not have valid feature names",
+            category=UserWarning,
         )
+
+        for step in range(horizon_steps):
+            pred = np.asarray(model.predict(window_state), dtype=np.float64)
+
+            predictions[:, step] = pred
+
+            # geser window: prediksi baru jadi lag_1, sisanya geser ke kanan,
+            # lag_w yang paling lama dibuang.
+            window_state = np.concatenate(
+                [pred.reshape(-1, 1), window_state[:, :-1]],
+                axis=1,
+            )
 
     return predictions
 
@@ -151,3 +167,63 @@ def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
     mae_per_step = abs_errors.mean(axis=0)
 
     return mae_per_step, predictions
+
+
+# ============================================================================
+# Persist model final + manifest (Tahap 5, dipakai lagi oleh evaluasi TEST
+# Tahap 6 & inference Tahap 7 -- satu tempat baca/tulis, jangan duplikat
+# format file di script lain).
+# ============================================================================
+
+def save_model(model, path):
+    """Simpan satu model (xgboost/lightgbm/catboost) ke .joblib.
+
+    Format SAMA dengan pipeline/model_training.py (metode lama) --
+    joblib.dump, bukan format native tiap library -- biar loader tetap
+    satu (joblib.load) tidak peduli model_name-nya apa.
+    """
+    import joblib
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    joblib.dump(model, path)
+
+
+def load_model(path):
+    """Load satu model dari .joblib (kebalikan save_model())."""
+    import joblib
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model tidak ditemukan: {path}")
+    return joblib.load(path)
+
+
+def model_path_for(model_name, models_dir):
+    """Path standar file model final: {models_dir}/{model_name}.joblib."""
+    return os.path.join(models_dir, f"{model_name}.joblib")
+
+
+def save_manifest(path, manifest):
+    """Simpan model_manifest.json: {model_name: {window, model_path,
+    feature_columns, n_train_samples, train_seconds, train_start,
+    train_end}}.
+
+    Manifest ini SATU-SATUNYA sumber kebenaran "model final pakai window
+    berapa" untuk tahap sesudahnya (06_evaluate_test.py, 07_run_inference.py)
+    -- supaya tidak ada tahap yang harus baca ulang window_search_results.csv
+    dan berisiko salah asosiasi model<->window kalau window_search
+    dijalankan ulang dengan kandidat window yang beda.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def load_manifest(path):
+    """Load model_manifest.json (kebalikan save_manifest())."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Model manifest tidak ditemukan: {path}\n"
+            "Jalankan 05_train_final_models.py dulu."
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)

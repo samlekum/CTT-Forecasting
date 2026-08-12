@@ -482,6 +482,36 @@ class Config:
     )
 
     # =========================================================================
+    # FINAL WINDOW MODELS (Tahap 5 -- window terpilih per model)
+    # =========================================================================
+    #
+    # Model produksi/final, satu model per Config.MODEL_NAMES, masing-masing
+    # dilatih pakai window TERBAIKNYA SENDIRI (lihat Config.WINDOW_SEARCH_BEST_FILE,
+    # hasil 04_search_window.py) di SELURUH periode TRAIN (Des'25-Mei'26, bukan
+    # cuma potongan FIT Des'25-Mar'26 yang dipakai buat window search).
+    #
+    # Sengaja folder BEDA dari Config.EXPANDING_MODELS_DIR (models/, metode
+    # expanding window lama) -- supaya tidak ketimpa/ketuker format fitur.
+    # Model expanding lama pakai 9 fitur statistik ringkas (mean/std/dst),
+    # model window baru pakai raw lag_1..lag_w mentah (jumlah kolom BEDA
+    # per model karena window terpilih beda-beda per model).
+
+    WINDOW_FINAL_MODELS_DIR = os.path.join(
+        PROJECT_ROOT,
+        "models_window",
+    )
+
+    WINDOW_FINAL_SUMMARY_FILE = os.path.join(
+        WINDOW_FINAL_MODELS_DIR,
+        "training_summary.csv",
+    )
+
+    WINDOW_FINAL_MANIFEST_FILE = os.path.join(
+        WINDOW_FINAL_MODELS_DIR,
+        "model_manifest.json",
+    )
+
+    # =========================================================================
     # NOISE SWEEP
     # =========================================================================
     #

@@ -319,6 +319,42 @@ class Config:
         "split_metadata.json",
     )
 
+    # -------------------------------------------------------------------------
+    # Window search: fit / validation split (SUBSET dari TRAIN)
+    # -------------------------------------------------------------------------
+    #
+    # Window terbaik per model dipilih pakai potongan EKOR dari TRAIN
+    # (bukan TEST asli) -- TEST (Jun-Jul) sama sekali tidak disentuh
+    # sampai evaluasi akhir, biar pemilihan window tidak bias/leak.
+    #
+    # FIT       : 2025-12-01 -> 2026-03-31 (dilatih single-step per window)
+    # VALIDATION: 2026-04-01 -> 2026-05-31 (dievaluasi recursive rollout
+    #             18 step, MAE rata-rata semua step per model per window)
+
+    WINDOW_SEARCH_FIT_END = "2026-03-31 23:59:59"
+    WINDOW_SEARCH_VAL_START = "2026-04-01 00:00:00"
+    WINDOW_SEARCH_VAL_END = "2026-05-31 23:59:59"
+
+    # Subsample anchor validation (ambil 1 dari N anchor secara berurutan)
+    # supaya rollout evaluation tidak usah pakai SEMUA anchor -- MAE rata-
+    # rata tetap representatif tanpa perlu itung jutaan anchor x horizon.
+    WINDOW_SEARCH_ANCHOR_STRIDE = 6
+
+    WINDOW_SEARCH_DIR = os.path.join(
+        PROJECT_ROOT,
+        "window_search",
+    )
+
+    WINDOW_SEARCH_RESULTS_FILE = os.path.join(
+        WINDOW_SEARCH_DIR,
+        "window_search_results.csv",
+    )
+
+    WINDOW_SEARCH_BEST_FILE = os.path.join(
+        WINDOW_SEARCH_DIR,
+        "best_window_per_model.csv",
+    )
+
     # =========================================================================
     # LEGACY EXPANDING DATASET PATHS
     # =========================================================================

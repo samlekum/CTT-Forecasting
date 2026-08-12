@@ -39,9 +39,11 @@ catboost_info/
 
 # Models
 models/
+models_window/
 models_noise_sweep/
 models_step_noise_sweep/
 models_step_noise_experiment/
+window_search/
 
 # Log
 *log

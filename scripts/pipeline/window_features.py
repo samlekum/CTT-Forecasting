@@ -347,3 +347,76 @@ def build_rollout_arrays(
         np.concatenate(all_future, axis=0),
         np.concatenate(all_pixel_ids, axis=0),
     )
+
+
+def build_rollout_arrays_with_anchors(
+    data_matrix,
+    timeline,
+    pixel_meta,
+    window,
+    horizon_steps,
+    anchor_stride=1,
+):
+    """
+    Sama seperti build_rollout_arrays(), TAPI juga mengembalikan
+    anchor_time (timestamp asli t0 per baris) -- dibutuhkan buat
+    grouping spatial metrics (spatial_collapse_ratio, spatial_correlation)
+    lintas pixel: baris-baris dengan anchor_time & step yang sama berasal
+    dari "kejadian" spasial yang sama (semua pixel grid pada waktu itu),
+    jadi harus bisa di-group balik.
+
+    build_rollout_arrays() yang lama SENGAJA tidak diubah/dipakai ulang
+    di sini (tetap dipakai apa adanya oleh 04_search_window.py) -- fungsi
+    ini duplikat logikanya secara sengaja supaya tidak ada resiko regresi
+    di 04_search_window.py.
+
+    Returns
+    -------
+    windows : np.ndarray, shape (N_total, window)
+    true_future : np.ndarray, shape (N_total, horizon_steps)
+    pixel_ids : np.ndarray, shape (N_total,)
+        pixel_id tiap baris.
+    anchor_time : np.ndarray, shape (N_total,), dtype datetime64[ns]
+        Timestamp asli t0 (anchor) tiap baris -- sama untuk baris-baris
+        dari pixel berbeda yang anchor-nya jatuh di titik waktu yang sama.
+    """
+
+    P = data_matrix.shape[1]
+    pixel_id = pixel_meta["pixel_id"]
+    timeline_values = np.asarray(timeline.values, dtype="datetime64[ns]")
+
+    all_windows = []
+    all_future = []
+    all_pixel_ids = []
+    all_anchor_time = []
+
+    for p in range(P):
+        windows, true_future, anchors = build_rollout_arrays_single_pixel(
+            data_matrix[:, p],
+            window=window,
+            horizon_steps=horizon_steps,
+            anchor_stride=anchor_stride,
+        )
+
+        if len(anchors) == 0:
+            continue
+
+        all_windows.append(windows)
+        all_future.append(true_future)
+        all_pixel_ids.append(np.full(len(anchors), pixel_id[p]))
+        all_anchor_time.append(timeline_values[anchors])
+
+    if not all_windows:
+        return (
+            np.empty((0, window)),
+            np.empty((0, horizon_steps)),
+            np.empty((0,), dtype=object),
+            np.empty((0,), dtype="datetime64[ns]"),
+        )
+
+    return (
+        np.concatenate(all_windows, axis=0),
+        np.concatenate(all_future, axis=0),
+        np.concatenate(all_pixel_ids, axis=0),
+        np.concatenate(all_anchor_time, axis=0),
+    )

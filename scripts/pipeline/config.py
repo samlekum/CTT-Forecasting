@@ -548,6 +548,23 @@ class Config:
         "recursive_mae_summary.csv",
     )
 
+    # -------------------------------------------------------------------------
+    # Window method -- evaluasi FINAL di TEST asli (Jun-Jul'26), Tahap 6
+    # (06_evaluate_test.py). Nama file SENGAJA beda dari
+    # RECURSIVE_EVAL_DETAIL_FILE/SUMMARY_FILE di atas (metode expanding
+    # window lama) supaya dua metode tidak saling timpa output-nya.
+    # -------------------------------------------------------------------------
+
+    WINDOW_TEST_EVAL_DETAIL_FILE = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "test_evaluation_detail.csv",
+    )
+
+    WINDOW_TEST_EVAL_SUMMARY_FILE = os.path.join(
+        EXPANDING_EVAL_DIR,
+        "test_evaluation_summary.csv",
+    )
+
     # =========================================================================
     # EXPERIMENTAL SWEEP OUTPUTS
     # =========================================================================

@@ -10,14 +10,20 @@
 #      VALIDATION (Apr-Mei'26) -- window awal diambil dari observasi asli,
 #      lalu di-rollout pakai prediksi model sendiri, dibandingkan ke
 #      observasi asli di tiap step.
-#   3. Simpan MAE per step + MAE rata-rata semua step.
+#   3. Simpan MAE per step + MAE rata-rata semua step, plus R^2 per step
+#      + R^2 rata-rata semua step (lihat pipeline/window_model_training.py
+#      r2_score_per_step, dihitung dari rollout yang SAMA -- bukan
+#      rollout terpisah).
 #
 # TEST asli (Jun-Jul'26) SAMA SEKALI TIDAK DISENTUH di tahap ini --
 # window terbaik dipilih murni dari VALIDATION, biar gak leak/bias ke
 # evaluasi akhir.
 #
 # Kriteria pemilihan window terbaik per model: MAE rata-rata SEMUA 18
-# step (bukan cuma horizon panjang atau step terakhir).
+# step (bukan cuma horizon panjang atau step terakhir). R^2 dihitung &
+# disimpan sebagai metrik tambahan (BUKAN kriteria seleksi) -- MAE tetap
+# jadi satu-satunya kriteria supaya perilaku seleksi window tidak berubah
+# dari desain sebelumnya.
 #
 # INPUT:
 #   dataset/temporal_split/train_temporal.npz
@@ -306,17 +312,19 @@ def main():
 
                 t0 = time.time()
 
-                mae_per_step, _ = recursive_rollout_mae(
+                mae_per_step, _, r2_per_step = recursive_rollout_mae(
                     model, val_windows, val_future, horizon_steps
                 )
 
                 rollout_elapsed = time.time() - t0
 
                 mae_avg = float(np.nanmean(mae_per_step))
+                r2_avg = float(np.nanmean(r2_per_step))
 
                 say_ok(
                     f"  {model_name} window={window}: "
                     f"MAE avg (18 step)={mae_avg:.4f}K "
+                    f"R2 avg (18 step)={r2_avg:.4f} "
                     f"({rollout_elapsed:.1f}s rollout)"
                 )
 
@@ -327,10 +335,14 @@ def main():
                     "n_val_anchors": len(val_windows),
                     "train_seconds": train_elapsed,
                     "mae_avg_all_steps": mae_avg,
+                    "r2_avg_all_steps": r2_avg,
                 }
 
                 for step in range(horizon_steps):
                     row[f"mae_step_{step + 1}"] = float(mae_per_step[step])
+
+                for step in range(horizon_steps):
+                    row[f"r2_step_{step + 1}"] = float(r2_per_step[step])
 
                 results.append(row)
 
@@ -357,7 +369,8 @@ def main():
         for _, row in best_df.iterrows():
             say_ok(
                 f"{row['model']:<10} -> window terbaik = {int(row['window'])} "
-                f"(MAE avg 18 step = {row['mae_avg_all_steps']:.4f}K)"
+                f"(MAE avg 18 step = {row['mae_avg_all_steps']:.4f}K, "
+                f"R2 avg 18 step = {row['r2_avg_all_steps']:.4f})"
             )
 
         hr()

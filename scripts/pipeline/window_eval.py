@@ -17,6 +17,29 @@ import numpy as np
 import pandas as pd
 
 
+def r2_score(preds, actuals):
+    """R^2 (koefisien determinasi) dari sekumpulan prediksi vs aktual.
+
+    R^2 = 1 - SS_res / SS_tot
+        SS_res = sum((actual - pred)^2)
+        SS_tot = sum((actual - mean(actual))^2)
+
+    Konsisten dengan pipeline/window_model_training.py::r2_score_per_step
+    (dipakai di 04_search_window.py) -- definisi & epsilon penyebut SAMA,
+    cuma ditulis ulang di sini karena summarize_by_step() bekerja di atas
+    detail_df long-format (groupby), bukan array wide (N, horizon_steps)
+    seperti di window_model_training.py.
+
+    +1e-12 di penyebut (bukan 0) supaya tidak divide-by-zero kalau
+    y_true di satu grup kebetulan konstan (SS_tot=0).
+    """
+    preds = np.asarray(preds, dtype=float)
+    actuals = np.asarray(actuals, dtype=float)
+    ss_res = np.sum((actuals - preds) ** 2)
+    ss_tot = np.sum((actuals - actuals.mean()) ** 2)
+    return float(1.0 - ss_res / (ss_tot + 1e-12))
+
+
 def spatial_collapse_ratio(preds, actuals):
     """std(prediksi) / std(aktual) ANTAR PIXEL, pada satu anchor_t0 & step
     yang sama. Mendekati 0 berarti model kolaps jadi rata secara spasial
@@ -93,10 +116,27 @@ def _spatial_metrics_per_step(detail_df):
     return summary
 
 
+def _r2_per_group(detail_df):
+    """R^2 per (model, step), dihitung dari SELURUH baris (semua pixel x
+    semua anchor_t0 digabung) di grup itu -- populasi sama persis dengan
+    yang dipakai mae/rmse di summarize_by_step, cuma agregatnya beda.
+    Terpisah dari groupby.agg() karena r2_score butuh y_true & y_pred
+    bersamaan (bukan agregat kolom tunggal seperti mean/std).
+    """
+    rows = []
+    for (model, step), group in detail_df.groupby(["model", "step"]):
+        rows.append({
+            "model": model,
+            "step": step,
+            "r2": r2_score(group["y_pred"].values, group["y_true"].values),
+        })
+    return pd.DataFrame(rows, columns=["model", "step", "r2"])
+
+
 def summarize_by_step(detail_df):
-    """Ringkas MAE per (model, step), plus metrik spasial (lihat
-    _spatial_metrics_per_step) -- indikator langsung buat ngecek gejala
-    'spatial collapse' selama recursive rollout di TEST set. Murni
+    """Ringkas MAE, RMSE, dan R^2 per (model, step), plus metrik spasial
+    (lihat _spatial_metrics_per_step) -- indikator langsung buat ngecek
+    gejala 'spatial collapse' selama recursive rollout di TEST set. Murni
     ringkasan deskriptif dari detail_df yang sudah ada.
     """
     grouped = detail_df.groupby(["model", "step"])
@@ -108,8 +148,12 @@ def summarize_by_step(detail_df):
         true_std=("y_true", "std"),
     ).reset_index()
 
+    r2_summary = _r2_per_group(detail_df)
     spatial_summary = _spatial_metrics_per_step(detail_df)
+
     summary = mae_summary.merge(
+        r2_summary, on=["model", "step"], how="left"
+    ).merge(
         spatial_summary, on=["model", "step"], how="left"
     )
     return summary.sort_values(["model", "step"]).reset_index(drop=True)

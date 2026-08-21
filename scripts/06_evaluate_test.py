@@ -31,8 +31,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Evaluasi final model window di TEST asli (Jun-Jul'26), "
-            "anchor_stride=1 (semua anchor), plus metrik spatial "
-            "collapse/correlation."
+            "anchor_stride=1 (semua anchor), plus MAE/RMSE/R2 dan metrik "
+            "spatial collapse/correlation."
         )
     )
 
@@ -279,6 +279,7 @@ def main():
             say_ok(
                 f"{model_name:<10} "
                 f"MAE={model_summary['mae'].mean():.3f} "
+                f"R2={model_summary['r2'].mean():.3f} "
                 f"collapse_ratio={model_summary['spatial_collapse_ratio'].mean():.3f} "
                 f"correlation={model_summary['spatial_correlation'].mean():.3f}"
             )

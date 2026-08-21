@@ -1,0 +1,259 @@
+diff --git a/scripts/04_search_window.py b/scripts/04_search_window.py
+index 25f5fc7..f19fdfa 100644
+--- a/scripts/04_search_window.py
++++ b/scripts/04_search_window.py
+@@ -10,14 +10,20 @@
+ #      VALIDATION (Apr-Mei'26) -- window awal diambil dari observasi asli,
+ #      lalu di-rollout pakai prediksi model sendiri, dibandingkan ke
+ #      observasi asli di tiap step.
+-#   3. Simpan MAE per step + MAE rata-rata semua step.
++#   3. Simpan MAE per step + MAE rata-rata semua step, plus R^2 per step
++#      + R^2 rata-rata semua step (lihat pipeline/window_model_training.py
++#      r2_score_per_step, dihitung dari rollout yang SAMA -- bukan
++#      rollout terpisah).
+ #
+ # TEST asli (Jun-Jul'26) SAMA SEKALI TIDAK DISENTUH di tahap ini --
+ # window terbaik dipilih murni dari VALIDATION, biar gak leak/bias ke
+ # evaluasi akhir.
+ #
+ # Kriteria pemilihan window terbaik per model: MAE rata-rata SEMUA 18
+-# step (bukan cuma horizon panjang atau step terakhir).
++# step (bukan cuma horizon panjang atau step terakhir). R^2 dihitung &
++# disimpan sebagai metrik tambahan (BUKAN kriteria seleksi) -- MAE tetap
++# jadi satu-satunya kriteria supaya perilaku seleksi window tidak berubah
++# dari desain sebelumnya.
+ #
+ # INPUT:
+ #   dataset/temporal_split/train_temporal.npz
+@@ -306,17 +312,19 @@ def main():
+ 
+                 t0 = time.time()
+ 
+-                mae_per_step, _ = recursive_rollout_mae(
++                mae_per_step, _, r2_per_step = recursive_rollout_mae(
+                     model, val_windows, val_future, horizon_steps
+                 )
+ 
+                 rollout_elapsed = time.time() - t0
+ 
+                 mae_avg = float(np.nanmean(mae_per_step))
++                r2_avg = float(np.nanmean(r2_per_step))
+ 
+                 say_ok(
+                     f"  {model_name} window={window}: "
+                     f"MAE avg (18 step)={mae_avg:.4f}K "
++                    f"R2 avg (18 step)={r2_avg:.4f} "
+                     f"({rollout_elapsed:.1f}s rollout)"
+                 )
+ 
+@@ -327,11 +335,15 @@ def main():
+                     "n_val_anchors": len(val_windows),
+                     "train_seconds": train_elapsed,
+                     "mae_avg_all_steps": mae_avg,
++                    "r2_avg_all_steps": r2_avg,
+                 }
+ 
+                 for step in range(horizon_steps):
+                     row[f"mae_step_{step + 1}"] = float(mae_per_step[step])
+ 
++                for step in range(horizon_steps):
++                    row[f"r2_step_{step + 1}"] = float(r2_per_step[step])
++
+                 results.append(row)
+ 
+         if not results:
+@@ -357,7 +369,8 @@ def main():
+         for _, row in best_df.iterrows():
+             say_ok(
+                 f"{row['model']:<10} -> window terbaik = {int(row['window'])} "
+-                f"(MAE avg 18 step = {row['mae_avg_all_steps']:.4f}K)"
++                f"(MAE avg 18 step = {row['mae_avg_all_steps']:.4f}K, "
++                f"R2 avg 18 step = {row['r2_avg_all_steps']:.4f})"
+             )
+ 
+         hr()
+diff --git a/scripts/06_evaluate_test.py b/scripts/06_evaluate_test.py
+index 74f49ba..55676f1 100644
+--- a/scripts/06_evaluate_test.py
++++ b/scripts/06_evaluate_test.py
+@@ -31,8 +31,8 @@ def parse_args():
+     parser = argparse.ArgumentParser(
+         description=(
+             "Evaluasi final model window di TEST asli (Jun-Jul'26), "
+-            "anchor_stride=1 (semua anchor), plus metrik spatial "
+-            "collapse/correlation."
++            "anchor_stride=1 (semua anchor), plus MAE/RMSE/R2 dan metrik "
++            "spatial collapse/correlation."
+         )
+     )
+ 
+@@ -279,6 +279,7 @@ def main():
+             say_ok(
+                 f"{model_name:<10} "
+                 f"MAE={model_summary['mae'].mean():.3f} "
++                f"R2={model_summary['r2'].mean():.3f} "
+                 f"collapse_ratio={model_summary['spatial_collapse_ratio'].mean():.3f} "
+                 f"correlation={model_summary['spatial_correlation'].mean():.3f}"
+             )
+diff --git a/scripts/pipeline/window_eval.py b/scripts/pipeline/window_eval.py
+index eba442a..c0532ea 100644
+--- a/scripts/pipeline/window_eval.py
++++ b/scripts/pipeline/window_eval.py
+@@ -17,6 +17,29 @@ import numpy as np
+ import pandas as pd
+ 
+ 
++def r2_score(preds, actuals):
++    """R^2 (koefisien determinasi) dari sekumpulan prediksi vs aktual.
++
++    R^2 = 1 - SS_res / SS_tot
++        SS_res = sum((actual - pred)^2)
++        SS_tot = sum((actual - mean(actual))^2)
++
++    Konsisten dengan pipeline/window_model_training.py::r2_score_per_step
++    (dipakai di 04_search_window.py) -- definisi & epsilon penyebut SAMA,
++    cuma ditulis ulang di sini karena summarize_by_step() bekerja di atas
++    detail_df long-format (groupby), bukan array wide (N, horizon_steps)
++    seperti di window_model_training.py.
++
++    +1e-12 di penyebut (bukan 0) supaya tidak divide-by-zero kalau
++    y_true di satu grup kebetulan konstan (SS_tot=0).
++    """
++    preds = np.asarray(preds, dtype=float)
++    actuals = np.asarray(actuals, dtype=float)
++    ss_res = np.sum((actuals - preds) ** 2)
++    ss_tot = np.sum((actuals - actuals.mean()) ** 2)
++    return float(1.0 - ss_res / (ss_tot + 1e-12))
++
++
+ def spatial_collapse_ratio(preds, actuals):
+     """std(prediksi) / std(aktual) ANTAR PIXEL, pada satu anchor_t0 & step
+     yang sama. Mendekati 0 berarti model kolaps jadi rata secara spasial
+@@ -93,10 +116,27 @@ def _spatial_metrics_per_step(detail_df):
+     return summary
+ 
+ 
++def _r2_per_group(detail_df):
++    """R^2 per (model, step), dihitung dari SELURUH baris (semua pixel x
++    semua anchor_t0 digabung) di grup itu -- populasi sama persis dengan
++    yang dipakai mae/rmse di summarize_by_step, cuma agregatnya beda.
++    Terpisah dari groupby.agg() karena r2_score butuh y_true & y_pred
++    bersamaan (bukan agregat kolom tunggal seperti mean/std).
++    """
++    rows = []
++    for (model, step), group in detail_df.groupby(["model", "step"]):
++        rows.append({
++            "model": model,
++            "step": step,
++            "r2": r2_score(group["y_pred"].values, group["y_true"].values),
++        })
++    return pd.DataFrame(rows, columns=["model", "step", "r2"])
++
++
+ def summarize_by_step(detail_df):
+-    """Ringkas MAE per (model, step), plus metrik spasial (lihat
+-    _spatial_metrics_per_step) -- indikator langsung buat ngecek gejala
+-    'spatial collapse' selama recursive rollout di TEST set. Murni
++    """Ringkas MAE, RMSE, dan R^2 per (model, step), plus metrik spasial
++    (lihat _spatial_metrics_per_step) -- indikator langsung buat ngecek
++    gejala 'spatial collapse' selama recursive rollout di TEST set. Murni
+     ringkasan deskriptif dari detail_df yang sudah ada.
+     """
+     grouped = detail_df.groupby(["model", "step"])
+@@ -108,8 +148,12 @@ def summarize_by_step(detail_df):
+         true_std=("y_true", "std"),
+     ).reset_index()
+ 
++    r2_summary = _r2_per_group(detail_df)
+     spatial_summary = _spatial_metrics_per_step(detail_df)
++
+     summary = mae_summary.merge(
++        r2_summary, on=["model", "step"], how="left"
++    ).merge(
+         spatial_summary, on=["model", "step"], how="left"
+     )
+     return summary.sort_values(["model", "step"]).reset_index(drop=True)
+diff --git a/scripts/pipeline/window_model_training.py b/scripts/pipeline/window_model_training.py
+index efaf494..adb1fa4 100644
+--- a/scripts/pipeline/window_model_training.py
++++ b/scripts/pipeline/window_model_training.py
+@@ -143,20 +143,67 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
+     return predictions
+ 
+ 
++def r2_score_per_step(predictions, true_future):
++    """
++    R^2 (koefisien determinasi) per step, dihitung ANTAR ANCHOR (semua
++    pixel x semua anchor_t0 digabung jadi satu populasi per step) --
++    konsisten dengan cara mae_per_step dihitung di recursive_rollout_mae
++    (axis=0 = across anchor, per kolom step).
++
++    R^2_step = 1 - SS_res / SS_tot
++        SS_res = sum((y_true - y_pred)^2)
++        SS_tot = sum((y_true - mean(y_true))^2)
++
++    Tidak pakai sklearn.metrics.r2_score supaya konsisten dengan gaya
++    modul ini (metrik lain di pipeline/window_eval.py juga ditulis
++    manual pakai numpy) dan menghindari dependency tambahan.
++
++    +1e-12 di penyebut (bukan 0) supaya tidak divide-by-zero kalau
++    true_future di satu step kebetulan konstan (SS_tot=0) -- kasus ini
++    R^2 secara definisi tidak bermakna, hasilnya jadi 0.0 (bukan NaN/inf)
++    kalau prediksi juga persis sama (SS_res=0), atau sangat negatif kalau
++    prediksi meleset dari nilai konstan itu.
++
++    Parameters
++    ----------
++    predictions : np.ndarray, shape (N, horizon_steps)
++    true_future : np.ndarray, shape (N, horizon_steps)
++
++    Returns
++    -------
++    r2_per_step : np.ndarray, shape (horizon_steps,)
++    """
++
++    predictions = np.asarray(predictions, dtype=np.float64)
++    true_future = np.asarray(true_future, dtype=np.float64)
++
++    ss_res = np.sum((true_future - predictions) ** 2, axis=0)
++    ss_tot = np.sum(
++        (true_future - true_future.mean(axis=0, keepdims=True)) ** 2,
++        axis=0,
++    )
++
++    return 1.0 - ss_res / (ss_tot + 1e-12)
++
++
+ def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
+     """
+-    Jalankan recursive_rollout_predict() lalu hitung MAE per step.
++    Jalankan recursive_rollout_predict() lalu hitung MAE per step DAN
++    R^2 per step (lihat r2_score_per_step) -- dua-duanya dihitung dari
++    hasil rollout yang sama, tidak ada rollout ganda.
+ 
+     Returns
+     -------
+     mae_per_step : np.ndarray, shape (horizon_steps,)
+     predictions : np.ndarray, shape (N, horizon_steps)
++    r2_per_step : np.ndarray, shape (horizon_steps,)
+     """
+ 
+     if initial_windows.shape[0] == 0:
+         return (
+             np.full(horizon_steps, np.nan),
+             np.empty((0, horizon_steps)),
++            np.full(horizon_steps, np.nan),
+         )
+ 
+     predictions = recursive_rollout_predict(
+@@ -166,7 +213,9 @@ def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
+     abs_errors = np.abs(predictions - true_future)
+     mae_per_step = abs_errors.mean(axis=0)
+ 
+-    return mae_per_step, predictions
++    r2_per_step = r2_score_per_step(predictions, true_future)
++
++    return mae_per_step, predictions, r2_per_step
+ 
+ 
+ # ============================================================================

@@ -143,20 +143,67 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
     return predictions
 
 
+def r2_score_per_step(predictions, true_future):
+    """
+    R^2 (koefisien determinasi) per step, dihitung ANTAR ANCHOR (semua
+    pixel x semua anchor_t0 digabung jadi satu populasi per step) --
+    konsisten dengan cara mae_per_step dihitung di recursive_rollout_mae
+    (axis=0 = across anchor, per kolom step).
+
+    R^2_step = 1 - SS_res / SS_tot
+        SS_res = sum((y_true - y_pred)^2)
+        SS_tot = sum((y_true - mean(y_true))^2)
+
+    Tidak pakai sklearn.metrics.r2_score supaya konsisten dengan gaya
+    modul ini (metrik lain di pipeline/window_eval.py juga ditulis
+    manual pakai numpy) dan menghindari dependency tambahan.
+
+    +1e-12 di penyebut (bukan 0) supaya tidak divide-by-zero kalau
+    true_future di satu step kebetulan konstan (SS_tot=0) -- kasus ini
+    R^2 secara definisi tidak bermakna, hasilnya jadi 0.0 (bukan NaN/inf)
+    kalau prediksi juga persis sama (SS_res=0), atau sangat negatif kalau
+    prediksi meleset dari nilai konstan itu.
+
+    Parameters
+    ----------
+    predictions : np.ndarray, shape (N, horizon_steps)
+    true_future : np.ndarray, shape (N, horizon_steps)
+
+    Returns
+    -------
+    r2_per_step : np.ndarray, shape (horizon_steps,)
+    """
+
+    predictions = np.asarray(predictions, dtype=np.float64)
+    true_future = np.asarray(true_future, dtype=np.float64)
+
+    ss_res = np.sum((true_future - predictions) ** 2, axis=0)
+    ss_tot = np.sum(
+        (true_future - true_future.mean(axis=0, keepdims=True)) ** 2,
+        axis=0,
+    )
+
+    return 1.0 - ss_res / (ss_tot + 1e-12)
+
+
 def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
     """
-    Jalankan recursive_rollout_predict() lalu hitung MAE per step.
+    Jalankan recursive_rollout_predict() lalu hitung MAE per step DAN
+    R^2 per step (lihat r2_score_per_step) -- dua-duanya dihitung dari
+    hasil rollout yang sama, tidak ada rollout ganda.
 
     Returns
     -------
     mae_per_step : np.ndarray, shape (horizon_steps,)
     predictions : np.ndarray, shape (N, horizon_steps)
+    r2_per_step : np.ndarray, shape (horizon_steps,)
     """
 
     if initial_windows.shape[0] == 0:
         return (
             np.full(horizon_steps, np.nan),
             np.empty((0, horizon_steps)),
+            np.full(horizon_steps, np.nan),
         )
 
     predictions = recursive_rollout_predict(
@@ -166,7 +213,9 @@ def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
     abs_errors = np.abs(predictions - true_future)
     mae_per_step = abs_errors.mean(axis=0)
 
-    return mae_per_step, predictions
+    r2_per_step = r2_score_per_step(predictions, true_future)
+
+    return mae_per_step, predictions, r2_per_step
 
 
 # ============================================================================

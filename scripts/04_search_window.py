@@ -140,6 +140,25 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--damping-rate",
+        type=float,
+        default=0.0,
+        help=(
+            "Kenaikan alpha damping per step recursive rollout (0.0 = "
+            "tidak ada damping, perilaku lama). Coba mulai dari nilai "
+            "kecil mis. 0.03-0.08 kalau R2/MAE jelek di step jauh "
+            "(lihat pipeline/window_model_training.py::recursive_rollout_predict)."
+        ),
+    )
+
+    parser.add_argument(
+        "--damping-cap",
+        type=float,
+        default=0.6,
+        help="Batas atas alpha damping. Default: 0.6.",
+    )
+
+    parser.add_argument(
         "--output",
         default=None,
         help="Path CSV hasil lengkap. Default: Config.WINDOW_SEARCH_RESULTS_FILE.",
@@ -216,6 +235,10 @@ def main():
     say_info(f"VALIDATION      : {val_start} s/d {val_end}")
     say_info(f"Anchor stride   : {anchor_stride} (validation rollout)")
     say_info(f"Horizon steps   : {horizon_steps}")
+    say_info(
+        f"Damping         : rate={args.damping_rate} cap={args.damping_cap} "
+        f"({'AKTIF' if args.damping_rate > 0 else 'nonaktif'})"
+    )
     say_info(
         f"Total kombinasi : {len(model_names)} model x {len(windows)} "
         f"window = {len(model_names) * len(windows)}"
@@ -339,7 +362,12 @@ def main():
                 t0 = time.time()
 
                 mae_per_step, _, r2_per_step = recursive_rollout_mae(
-                    model, val_windows, val_future, horizon_steps
+                    model,
+                    val_windows,
+                    val_future,
+                    horizon_steps,
+                    damping_rate=args.damping_rate,
+                    damping_cap=args.damping_cap,
                 )
 
                 rollout_elapsed = time.time() - t0
@@ -362,6 +390,8 @@ def main():
                     "train_seconds": train_elapsed,
                     "mae_avg_all_steps": mae_avg,
                     "r2_avg_all_steps": r2_avg,
+                    "damping_rate": args.damping_rate,
+                    "damping_cap": args.damping_cap,
                 }
 
                 for step in range(horizon_steps):

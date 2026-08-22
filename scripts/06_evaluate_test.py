@@ -229,8 +229,18 @@ def main():
 
             t1 = time.time()
 
+            # damping_rate/cap dibaca dari manifest (Tahap 5) -- default 0.0
+            # untuk manifest lama yang belum punya field ini (getattr-style
+            # via .get supaya backward-compatible).
+            damping_rate = entry.get("damping_rate", 0.0)
+            damping_cap = entry.get("damping_cap", 0.6)
+
             predictions = recursive_rollout_predict(
-                model, windows, horizon_steps=horizon_steps
+                model,
+                windows,
+                horizon_steps=horizon_steps,
+                damping_rate=damping_rate,
+                damping_cap=damping_cap,
             )
 
             predict_elapsed = time.time() - t1

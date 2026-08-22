@@ -91,11 +91,36 @@ def train_one_model(model_name, X_train, y_train):
     return model, elapsed
 
 
-def recursive_rollout_predict(model, initial_windows, horizon_steps):
+def recursive_rollout_predict(
+    model,
+    initial_windows,
+    horizon_steps,
+    damping_rate=0.0,
+    damping_cap=0.6,
+):
     """
     Rollout recursive BATCHED (semua anchor diprediksi bersamaan per
     step, bukan loop Python per anchor) -- model dipanggil persis
     horizon_steps kali, TIDAK peduli berapa banyak anchor-nya.
+
+    DAMPING (opsional, default OFF supaya backward-compatible):
+    Recursive rollout tanpa exogenous feature gampang "lari liar" makin
+    jauh step-nya karena error step sebelumnya ikut jadi input step
+    berikutnya (exposure bias). Kalau damping_rate > 0, tiap step prediksi
+    ditarik sebagian ke `reference` (rata-rata window OBSERVASI ASLI di
+    t0, bukan window yang sudah tercampur prediksi) -- bobot tarikannya
+    (`alpha`) membesar linear per step sampai batas `damping_cap`:
+
+        alpha_step  = min(damping_rate * step, damping_cap)
+        pred_final  = (1 - alpha_step) * pred_raw + alpha_step * reference
+
+    `reference` dihitung SEKALI dari initial_windows (persisten sepanjang
+    rollout), bukan window_state yang terus berubah -- supaya damping
+    menarik ke kondisi awal yang benar-benar teramati, bukan ke rata-rata
+    prediksi sendiri yang mungkin sudah bias juga.
+
+    damping_rate=0.0 -> identik dengan versi sebelum ada damping (tidak
+    ada perubahan perilaku untuk caller yang belum di-update).
 
     Parameters
     ----------
@@ -103,6 +128,10 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
     initial_windows : np.ndarray, shape (N, window)
         Kolom 0 = lag_1 (observasi paling baru) ... kolom -1 = lag_w.
     horizon_steps : int
+    damping_rate : float, default 0.0
+        Kenaikan alpha per step. 0.0 = tidak ada damping.
+    damping_cap : float, default 0.6
+        Batas atas alpha (jangan sampai pred_raw diabaikan sepenuhnya).
 
     Returns
     -------
@@ -114,6 +143,8 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
     n_anchors = window_state.shape[0]
 
     predictions = np.zeros((n_anchors, horizon_steps), dtype=np.float64)
+
+    reference = window_state.mean(axis=1) if damping_rate > 0 else None
 
     # Suppress "X does not have valid feature names, but LGBMRegressor was
     # fitted with feature names" (sklearn/LightGBM UserWarning, kosmetik --
@@ -130,6 +161,11 @@ def recursive_rollout_predict(model, initial_windows, horizon_steps):
 
         for step in range(horizon_steps):
             pred = np.asarray(model.predict(window_state), dtype=np.float64)
+
+            if damping_rate > 0:
+                alpha = min(damping_rate * step, damping_cap)
+                if alpha > 0:
+                    pred = (1.0 - alpha) * pred + alpha * reference
 
             predictions[:, step] = pred
 
@@ -186,11 +222,22 @@ def r2_score_per_step(predictions, true_future):
     return 1.0 - ss_res / (ss_tot + 1e-12)
 
 
-def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
+def recursive_rollout_mae(
+    model,
+    initial_windows,
+    true_future,
+    horizon_steps,
+    damping_rate=0.0,
+    damping_cap=0.6,
+):
     """
     Jalankan recursive_rollout_predict() lalu hitung MAE per step DAN
     R^2 per step (lihat r2_score_per_step) -- dua-duanya dihitung dari
     hasil rollout yang sama, tidak ada rollout ganda.
+
+    damping_rate/damping_cap diteruskan apa adanya ke
+    recursive_rollout_predict() -- default 0.0 = tanpa damping, sama
+    seperti perilaku sebelumnya.
 
     Returns
     -------
@@ -207,7 +254,11 @@ def recursive_rollout_mae(model, initial_windows, true_future, horizon_steps):
         )
 
     predictions = recursive_rollout_predict(
-        model, initial_windows, horizon_steps
+        model,
+        initial_windows,
+        horizon_steps,
+        damping_rate=damping_rate,
+        damping_cap=damping_cap,
     )
 
     abs_errors = np.abs(predictions - true_future)

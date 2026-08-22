@@ -9,10 +9,12 @@
 #   - Window BUKAN satu nilai global (Config.MIN_WINDOW_SIZE) -- window
 #     dibaca PER MODEL dari model_manifest.json (satu-satunya sumber
 #     kebenaran, sama seperti 06_evaluate_test.py).
-#   - TIDAK ADA damping. Metode window baru tidak pernah memakai damping
-#     di training/evaluasi (lihat window_model_training.py) -- rollout
-#     produksi harus konsisten dengan itu, jadi prediksi dipakai APA
-#     ADANYA sebagai lag_1 di step berikutnya.
+#   - Damping OPSIONAL (default OFF, backward-compatible) -- dibaca dari
+#     model_manifest.json (field "damping_rate"/"damping_cap" hasil
+#     05_train_final_models.py), BUKAN dihardcode di sini, supaya rollout
+#     produksi otomatis konsisten dengan window search & evaluasi TEST
+#     yang dipakai buat menentukan nilai damping tersebut. Lihat
+#     window_model_training.py::recursive_rollout_predict untuk formulanya.
 #   - Rollout TIDAK ditulis ulang di sini. Loop shift-window sudah ada &
 #     sudah divalidasi di window_model_training.recursive_rollout_predict
 #     (dipakai bareng oleh 04_search_window.py & 06_evaluate_test.py) --
@@ -296,7 +298,14 @@ def build_initial_windows(data_matrix, anchors_df, window_size):
 # ROLLOUT FORECAST -> LONG-FORMAT DETAIL DF
 # ============================================================================
 
-def run_forecast_rollout(model, anchors_df, initial_windows, horizon_steps=None):
+def run_forecast_rollout(
+    model,
+    anchors_df,
+    initial_windows,
+    horizon_steps=None,
+    damping_rate=0.0,
+    damping_cap=0.6,
+):
     """Rollout recursive dari SATU window per pixel (forecast produksi,
     TIDAK ada y_true dari observasi masa depan yang belum terjadi).
 
@@ -304,6 +313,11 @@ def run_forecast_rollout(model, anchors_df, initial_windows, horizon_steps=None)
     window_model_training.recursive_rollout_predict() (SAMA persis yang
     dipakai window search & evaluasi TEST), supaya rollout produksi tidak
     bisa diam-diam berbeda perilakunya dari yang sudah divalidasi di sana.
+
+    damping_rate/damping_cap sebaiknya diisi dari model_manifest.json
+    (field "damping_rate"/"damping_cap" hasil 05_train_final_models.py),
+    BUKAN diketik manual di sini -- supaya forecast produksi konsisten
+    dengan window search & evaluasi TEST yang sudah divalidasi.
 
     Return
     ------
@@ -314,7 +328,11 @@ def run_forecast_rollout(model, anchors_df, initial_windows, horizon_steps=None)
         horizon_steps = HORIZON_STEPS
 
     predictions = recursive_rollout_predict(
-        model, initial_windows, horizon_steps=horizon_steps
+        model,
+        initial_windows,
+        horizon_steps=horizon_steps,
+        damping_rate=damping_rate,
+        damping_cap=damping_cap,
     )  # shape (n_pixel, horizon_steps)
 
     window_end_time = pd.to_datetime(anchors_df["window_end_time"].values)
@@ -589,7 +607,18 @@ def run_inference(
 
     initial_windows = build_initial_windows(data_matrix, anchors_df, window_size=window)
 
-    detail_df = run_forecast_rollout(model, anchors_df, initial_windows)
+    damping_rate = manifest[model_name].get("damping_rate", 0.0)
+    damping_cap = manifest[model_name].get("damping_cap", 0.6)
+    if damping_rate > 0:
+        say_info(f"Damping aktif (dari manifest): rate={damping_rate} cap={damping_cap}")
+
+    detail_df = run_forecast_rollout(
+        model,
+        anchors_df,
+        initial_windows,
+        damping_rate=damping_rate,
+        damping_cap=damping_cap,
+    )
 
     if skip_actual:
         detail_df["y_true"] = np.nan

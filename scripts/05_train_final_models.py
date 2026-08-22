@@ -119,6 +119,25 @@ def parse_args():
         help="Folder output model final. Default: Config.WINDOW_FINAL_MODELS_DIR.",
     )
 
+    parser.add_argument(
+        "--damping-rate",
+        type=float,
+        default=0.0,
+        help=(
+            "Damping rate hasil tuning di 04_search_window.py (--damping-rate). "
+            "Disimpan ke model_manifest.json supaya 06_evaluate_test.py dan "
+            "07_run_inference.py otomatis pakai nilai yang SAMA -- tidak perlu "
+            "diketik ulang manual tiap tahap. Default 0.0 = tanpa damping."
+        ),
+    )
+
+    parser.add_argument(
+        "--damping-cap",
+        type=float,
+        default=0.6,
+        help="Batas atas alpha damping. Default: 0.6.",
+    )
+
     return parser.parse_args()
 
 
@@ -288,6 +307,8 @@ def main():
                 "train_seconds": train_elapsed,
                 "train_start": str(timeline[0]),
                 "train_end": str(timeline[-1]),
+                "damping_rate": args.damping_rate,
+                "damping_cap": args.damping_cap,
             }
 
         if not summary_rows:

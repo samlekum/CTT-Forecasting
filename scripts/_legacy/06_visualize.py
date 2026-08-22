@@ -1,15 +1,28 @@
-# ./scripts/06_visualize.py
-# Tahap 7: render hasil forecast Stage 05 (CSV di forecast_output/) jadi
+# ./scripts/_legacy/06_visualize.py
+#
+# *** LEGACY -- metode expanding window lama, BUKAN bagian pipeline aktif
+# *** (01-06 fixed-window). Disimpan cuma buat referensi/perbandingan.
+# *** Rantai import ini TERBUKTI RUSAK (pipeline._legacy.inference ->
+# *** pipeline.recursive_eval yang tidak ada di repo) -- jangan
+# *** disentuh/dipakai.
+#
+# Tahap 7 (lama): render hasil forecast Stage 05 (CSV di forecast_output/) jadi
 # animasi GIF -- 6 panel PETA per step (Input/Prediksi/Aktual/Kelas Awan/
 # Risiko Banjir/Error Map). Trigger manual/on-demand, pemilihan file
 # forecast via CLI select menu (auto-pick kalau cuma 1, list+prompt kalau
-# >1, berhenti bersih kalau 0). Lihat pipeline/visualize.py untuk detail.
+# >1, berhenti bersih kalau 0). Lihat pipeline/_legacy/visualize.py untuk detail.
 
 import argparse
+import os
+import sys
+
+_SCRIPTS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
 
 from ui.terminal_display import hr, gap, banner, say_info, say_error
 from pipeline.config import load_config
-from pipeline.visualize import visualize_forecast
+from pipeline._legacy.visualize import visualize_forecast
 
 
 def parse_args():

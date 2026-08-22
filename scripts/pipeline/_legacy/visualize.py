@@ -31,7 +31,7 @@ from matplotlib.ticker import FormatStrFormatter
 from PIL import Image
 
 from pipeline.config import Config
-from pipeline.inference import CSV_COLUMNS, load_raw_values_lookup
+from pipeline._legacy.inference import CSV_COLUMNS, load_raw_values_lookup
 from ui.terminal_display import say_info, say_ok, say_error, banner, make_progress_bar, _c
 
 FREQ_MINUTES = Config.FREQ_MINUTES

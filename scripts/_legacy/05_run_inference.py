@@ -1,15 +1,28 @@
-# ./scripts/05_run_inference.py
-# Tahap 6: forecast produksi -- baca window observasi terbaru (atau di
+# ./scripts/_legacy/05_run_inference.py
+#
+# *** LEGACY -- metode expanding window lama, BUKAN bagian pipeline aktif
+# *** (01-06 fixed-window). Disimpan cuma buat referensi/perbandingan.
+# *** Rantai import ini TERBUKTI RUSAK kalau dijalankan (pipeline.recursive_eval
+# *** tidak ada di repo, Config.MIN_WINDOW_SIZE sudah dihapus) -- jangan
+# *** disentuh/dipakai.
+#
+# Tahap 6 (lama): forecast produksi -- baca window observasi terbaru (atau di
 # sekitar --t0) dari file .nc yang sudah ada di data_bandung/, rollout
 # recursive pakai model yang sudah dilatih (auto-detect model terbaik dari
 # hasil 04_recursive_evaluate.py, atau manual via --model), simpan CSV +
-# GeoJSON. Lihat pipeline/inference.py untuk detail desain.
+# GeoJSON. Lihat pipeline/_legacy/inference.py untuk detail desain.
 
 import argparse
+import os
+import sys
+
+_SCRIPTS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
 
 from ui.terminal_display import hr, gap, banner, say_info, say_error
 from pipeline.config import load_config
-from pipeline.inference import run_inference
+from pipeline._legacy.inference import run_inference
 
 
 def parse_args():

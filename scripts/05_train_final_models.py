@@ -130,6 +130,19 @@ def _load_best_window_map(best_window_file):
         )
 
     best_df = pd.read_csv(best_window_file)
+
+    dup_models = best_df["model"][best_df["model"].duplicated()].unique().tolist()
+    if dup_models:
+        raise ValueError(
+            f"File {best_window_file} punya baris duplikat untuk model: "
+            f"{dup_models}. File --best-window-file harus berisi TEPAT SATU "
+            "baris per model (best_window_per_model.csv hasil "
+            "04_search_window.py, bukan window_search_results.csv yang "
+            "berisi SEMUA kombinasi model x window). Kalau file yang salah "
+            "ini di-pass, window yang kepilih diam-diam jadi baris terakhir "
+            "per model -- BUKAN window dengan MAE terendah."
+        )
+
     return dict(zip(best_df["model"], best_df["window"].astype(int)))
 
 

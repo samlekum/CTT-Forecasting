@@ -145,6 +145,18 @@ def parse_args():
         help="Path CSV hasil lengkap. Default: Config.WINDOW_SEARCH_RESULTS_FILE.",
     )
 
+    parser.add_argument(
+        "--best-output",
+        default=None,
+        help=(
+            "Path CSV window terbaik per model. Default: kalau --output "
+            "di-set, ikut direktori --output (nama file sama seperti "
+            "Config.WINDOW_SEARCH_BEST_FILE) supaya smoke-test TIDAK "
+            "menimpa best-window file produksi. Kalau --output tidak "
+            "di-set, default Config.WINDOW_SEARCH_BEST_FILE seperti biasa."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -179,7 +191,21 @@ def main():
     horizon_steps = cfg.HORIZON_STEPS
 
     output_path = args.output or cfg.WINDOW_SEARCH_RESULTS_FILE
-    best_path = cfg.WINDOW_SEARCH_BEST_FILE
+
+    if args.best_output:
+        # User eksplisit nentuin path best-window sendiri -- pakai itu.
+        best_path = args.best_output
+    elif args.output:
+        # --output di-set tapi --best-output tidak: JANGAN jatuh balik ke
+        # Config.WINDOW_SEARCH_BEST_FILE (lokasi produksi). Taruh best-window
+        # file di direktori --output yang sama, biar smoke-test run tidak
+        # diam-diam menimpa best_window_per_model.csv produksi.
+        best_path = os.path.join(
+            os.path.dirname(output_path) or ".",
+            os.path.basename(cfg.WINDOW_SEARCH_BEST_FILE),
+        )
+    else:
+        best_path = cfg.WINDOW_SEARCH_BEST_FILE
 
     banner("WINDOW SEARCH")
 

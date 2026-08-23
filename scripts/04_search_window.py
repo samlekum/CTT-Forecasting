@@ -60,9 +60,9 @@ from pipeline.temporal_dataset import (
 )
 from pipeline.window_features import (
     build_window_dataset,
-    build_rollout_arrays,
+    build_rollout_arrays_with_anchors,
     TARGET_COLUMN,
-    lag_column_names,
+    feature_column_names,
 )
 from pipeline.window_model_training import (
     train_one_model,
@@ -307,8 +307,8 @@ def main():
                 )
                 continue
 
-            lag_cols = lag_column_names(window)
-            X_fit = fit_df[lag_cols].values
+            feature_cols = feature_column_names(window)
+            X_fit = fit_df[feature_cols].values
             y_fit = fit_df[TARGET_COLUMN].values
 
             say_info(
@@ -318,13 +318,15 @@ def main():
 
             t0 = time.time()
 
-            val_windows, val_future, val_pixel_ids = build_rollout_arrays(
-                val_data,
-                val_timeline,
-                pixel_meta,
-                window=window,
-                horizon_steps=horizon_steps,
-                anchor_stride=anchor_stride,
+            val_windows, val_future, val_pixel_ids, val_anchor_time = (
+                build_rollout_arrays_with_anchors(
+                    val_data,
+                    val_timeline,
+                    pixel_meta,
+                    window=window,
+                    horizon_steps=horizon_steps,
+                    anchor_stride=anchor_stride,
+                )
             )
 
             build_val_elapsed = time.time() - t0
@@ -366,6 +368,8 @@ def main():
                     val_windows,
                     val_future,
                     horizon_steps,
+                    anchor_time=val_anchor_time,
+                    freq_minutes=cfg.FREQ_MINUTES,
                     damping_rate=args.damping_rate,
                     damping_cap=args.damping_cap,
                 )

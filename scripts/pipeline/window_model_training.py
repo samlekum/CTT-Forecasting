@@ -17,6 +17,9 @@ import time
 import warnings
 
 import numpy as np
+import pandas as pd
+
+from pipeline.time_features import time_features_from_timestamps
 
 
 def train_xgboost(X_train, y_train):
@@ -95,6 +98,8 @@ def recursive_rollout_predict(
     model,
     initial_windows,
     horizon_steps,
+    anchor_time,
+    freq_minutes=10,
     damping_rate=0.0,
     damping_cap=0.6,
 ):
@@ -102,6 +107,16 @@ def recursive_rollout_predict(
     Rollout recursive BATCHED (semua anchor diprediksi bersamaan per
     step, bukan loop Python per anchor) -- model dipanggil persis
     horizon_steps kali, TIDAK peduli berapa banyak anchor-nya.
+
+    FITUR WAKTU (hour_sin/hour_cos, lihat pipeline/time_features.py):
+    di tiap step, target_time = anchor_time + (step+1) * freq_minutes
+    dihitung LANGSUNG dari anchor_time asli -- BUKAN dari window_state
+    yang sudah bercampur prediksi. Ini yang bikin fitur waktu tetap
+    valid persis di step manapun, walau window_state sendiri sudah jauh
+    dari observasi asli (exposure bias). Fitur waktu di-concat SETELAH
+    lag columns, urutan HARUS sama dengan
+    pipeline/window_features.py::feature_column_names() yang dipakai
+    saat training -- jangan ubah urutan di sini tanpa ubah di sana juga.
 
     DAMPING (opsional, default OFF supaya backward-compatible):
     Recursive rollout tanpa exogenous feature gampang "lari liar" makin
@@ -128,6 +143,14 @@ def recursive_rollout_predict(
     initial_windows : np.ndarray, shape (N, window)
         Kolom 0 = lag_1 (observasi paling baru) ... kolom -1 = lag_w.
     horizon_steps : int
+    anchor_time : array-like, shape (N,), datetime64[ns] (UTC)
+        Timestamp t0 asli per baris -- dipakai buat hitung target_time
+        tiap step (anchor_time + (step+1)*freq_minutes), BUKAN opsional,
+        karena model sekarang dilatih dengan fitur waktu (lihat
+        pipeline/time_features.py). Untuk model lama tanpa fitur waktu,
+        panggil dengan window model_manifest yang sesuai.
+    freq_minutes : int, default 10
+        Resolusi timestep Himawari, dipakai buat hitung target_time.
     damping_rate : float, default 0.0
         Kenaikan alpha per step. 0.0 = tidak ada damping.
     damping_cap : float, default 0.6
@@ -141,6 +164,17 @@ def recursive_rollout_predict(
 
     window_state = initial_windows.astype(np.float64).copy()
     n_anchors = window_state.shape[0]
+
+    anchor_time = pd.DatetimeIndex(
+        np.asarray(anchor_time, dtype="datetime64[ns]")
+    )
+
+    if len(anchor_time) != n_anchors:
+        raise ValueError(
+            "anchor_time harus punya panjang N sama dengan "
+            f"initial_windows: len(anchor_time)={len(anchor_time)}, "
+            f"n_anchors={n_anchors}."
+        )
 
     predictions = np.zeros((n_anchors, horizon_steps), dtype=np.float64)
 
@@ -160,7 +194,14 @@ def recursive_rollout_predict(
         )
 
         for step in range(horizon_steps):
-            pred = np.asarray(model.predict(window_state), dtype=np.float64)
+            target_time = anchor_time + pd.Timedelta(
+                minutes=freq_minutes * (step + 1)
+            )
+            time_feats = time_features_from_timestamps(target_time.values)
+
+            X_step = np.concatenate([window_state, time_feats], axis=1)
+
+            pred = np.asarray(model.predict(X_step), dtype=np.float64)
 
             if damping_rate > 0:
                 alpha = min(damping_rate * step, damping_cap)
@@ -170,7 +211,9 @@ def recursive_rollout_predict(
             predictions[:, step] = pred
 
             # geser window: prediksi baru jadi lag_1, sisanya geser ke kanan,
-            # lag_w yang paling lama dibuang.
+            # lag_w yang paling lama dibuang. hour_sin/hour_cos TIDAK ikut
+            # digeser -- selalu dihitung ULANG tiap step dari anchor_time,
+            # itu justru poin utamanya (lihat docstring di atas).
             window_state = np.concatenate(
                 [pred.reshape(-1, 1), window_state[:, :-1]],
                 axis=1,
@@ -227,6 +270,8 @@ def recursive_rollout_mae(
     initial_windows,
     true_future,
     horizon_steps,
+    anchor_time,
+    freq_minutes=10,
     damping_rate=0.0,
     damping_cap=0.6,
 ):
@@ -234,6 +279,10 @@ def recursive_rollout_mae(
     Jalankan recursive_rollout_predict() lalu hitung MAE per step DAN
     R^2 per step (lihat r2_score_per_step) -- dua-duanya dihitung dari
     hasil rollout yang sama, tidak ada rollout ganda.
+
+    anchor_time/freq_minutes diteruskan apa adanya ke
+    recursive_rollout_predict() -- dibutuhkan buat hitung fitur waktu
+    (hour_sin/hour_cos) tiap step, lihat pipeline/time_features.py.
 
     damping_rate/damping_cap diteruskan apa adanya ke
     recursive_rollout_predict() -- default 0.0 = tanpa damping, sama
@@ -257,6 +306,8 @@ def recursive_rollout_mae(
         model,
         initial_windows,
         horizon_steps,
+        anchor_time=anchor_time,
+        freq_minutes=freq_minutes,
         damping_rate=damping_rate,
         damping_cap=damping_cap,
     )
@@ -327,3 +378,36 @@ def load_manifest(path):
         )
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# Versi feature set saat ini -- lag_1..lag_w + hour_sin/hour_cos (lihat
+# pipeline/time_features.py). Manifest lama (sebelum fitur waktu
+# ditambahkan) tidak punya field "feature_set" sama sekali -- kalau
+# model itu di-load & di-rollout pakai recursive_rollout_predict() versi
+# BARU (yang selalu concat time_feats), jumlah kolom X yang dikirim ke
+# model.predict() akan MISMATCH dengan jumlah kolom saat model itu
+# dilatih dulu -- kebanyakan library (xgboost/lightgbm/catboost) akan
+# error jelas soal shape, TAPI beberapa kasus bisa diam-diam salah
+# interpretasi kolom. Guard ini bikin errornya eksplisit & jelas
+# pesannya, bukan nunggu error shape yang membingungkan dari library ML.
+EXPECTED_FEATURE_SET = "lag_time_v1"
+
+
+def check_feature_set(manifest_entry, model_name):
+    """Pastikan entry manifest satu model punya feature_set yang cocok
+    dengan versi recursive_rollout_predict() saat ini. Panggil ini
+    SEBELUM rollout (06_evaluate_test.py, pipeline/inference.py) --
+    bukan opsional, karena mismatch di sini silent-fail di beberapa
+    kombinasi library/versi.
+    """
+    feature_set = manifest_entry.get("feature_set")
+    if feature_set != EXPECTED_FEATURE_SET:
+        raise ValueError(
+            f"Model '{model_name}' punya feature_set="
+            f"{feature_set!r} di manifest, tapi kode rollout saat ini "
+            f"butuh feature_set={EXPECTED_FEATURE_SET!r} (lag + fitur "
+            "waktu hour_sin/hour_cos). Model ini kemungkinan dilatih "
+            "SEBELUM fitur waktu ditambahkan -- jalankan ulang "
+            "04_search_window.py + 05_train_final_models.py dari nol "
+            f"untuk '{model_name}' supaya manifest-nya konsisten."
+        )

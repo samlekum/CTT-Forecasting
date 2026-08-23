@@ -36,6 +36,10 @@ import numpy as np
 import pandas as pd
 
 from pipeline.config import Config
+from pipeline.time_features import (
+    time_features_from_timestamps,
+    TIME_FEATURE_COLUMNS,
+)
 
 
 TARGET_COLUMN = "target_tbb"
@@ -45,6 +49,22 @@ def lag_column_names(window):
     """Nama kolom lag_1..lag_w, konsisten dipakai di training & inference."""
 
     return [f"lag_{k}" for k in range(1, window + 1)]
+
+
+def feature_column_names(window):
+    """Nama SEMUA kolom fitur (lag + waktu), urutan tetap: lag_1..lag_w
+    dulu baru TIME_FEATURE_COLUMNS.
+
+    SATU-SATUNYA sumber urutan kolom fitur -- dipakai di training
+    (04_search_window.py/05_train_final_models.py, X = df[feature_column_names(window)])
+    DAN di rollout (window_model_training.recursive_rollout_predict,
+    np.concatenate([window_state, time_feats])). Kalau urutan ini beda
+    antara training & rollout, model salah interpretasi kolom TANPA
+    error apapun (silent bug) -- makanya jangan bangun list ini manual
+    di tempat lain, selalu panggil fungsi ini.
+    """
+
+    return lag_column_names(window) + list(TIME_FEATURE_COLUMNS)
 
 
 def compute_window_samples_single_pixel(y, window):
@@ -134,8 +154,15 @@ def build_window_dataset(
     Returns
     -------
     pd.DataFrame dengan kolom:
-        lag_1 .. lag_w, pixel_id, latitude, longitude,
+        lag_1 .. lag_w, hour_sin, hour_cos, pixel_id, latitude, longitude,
         anchor_time, target_time, target_tbb
+
+    hour_sin/hour_cos dihitung dari target_time (lihat
+    pipeline/time_features.py) -- SENGAJA dari waktu TARGET yang
+    diprediksi, bukan waktu anchor (t0). Alasan: ini fitur yang harus
+    tetap valid saat recursive rollout, di mana yang diketahui pasti di
+    tiap step adalah "jam berapa titik yang sedang diprediksi", bukan
+    "jam berapa observasi terakhir" (itu sudah terkandung di lag_1).
     """
 
     T, P = data_matrix.shape
@@ -169,6 +196,12 @@ def build_window_dataset(
             columns=lag_column_names(window),
         )
 
+        time_feats = time_features_from_timestamps(
+            timeline_values[target_idx]
+        )
+        for col_idx, col_name in enumerate(TIME_FEATURE_COLUMNS):
+            df[col_name] = time_feats[:, col_idx]
+
         df["pixel_id"] = pixel_id[p]
         df["latitude"] = latitude[p]
         df["longitude"] = longitude[p]
@@ -182,6 +215,7 @@ def build_window_dataset(
         return pd.DataFrame(
             columns=(
                 lag_column_names(window)
+                + TIME_FEATURE_COLUMNS
                 + [
                     "pixel_id",
                     "latitude",
@@ -366,9 +400,13 @@ def build_rollout_arrays_with_anchors(
     jadi harus bisa di-group balik.
 
     build_rollout_arrays() yang lama SENGAJA tidak diubah/dipakai ulang
-    di sini (tetap dipakai apa adanya oleh 04_search_window.py) -- fungsi
-    ini duplikat logikanya secara sengaja supaya tidak ada resiko regresi
-    di 04_search_window.py.
+    di sini -- fungsi ini duplikat logikanya secara sengaja. CATATAN
+    (update fitur waktu): 04_search_window.py SEKARANG pakai fungsi
+    `_with_anchors` ini juga (bukan lagi build_rollout_arrays() versi
+    tanpa anchor_time), karena recursive_rollout_predict() butuh
+    anchor_time buat hitung fitur waktu (hour_sin/hour_cos) tiap step
+    rollout. build_rollout_arrays() versi lama dibiarkan ada (tidak
+    dihapus) tapi sudah tidak dipanggil di manapun di pipeline aktif.
 
     Returns
     -------

@@ -51,7 +51,7 @@ from pipeline.temporal_dataset import load_temporal_cache
 from pipeline.window_features import (
     build_window_dataset,
     TARGET_COLUMN,
-    lag_column_names,
+    feature_column_names,
 )
 from pipeline.window_model_training import (
     train_one_model,
@@ -267,8 +267,8 @@ def main():
                 )
                 continue
 
-            lag_cols = lag_column_names(window)
-            X_train = train_df[lag_cols].values
+            feature_cols = feature_column_names(window)
+            X_train = train_df[feature_cols].values
             y_train = train_df[TARGET_COLUMN].values
 
             say_info(
@@ -301,7 +301,8 @@ def main():
             manifest[model_name] = {
                 "window": window,
                 "model_path": model_path,
-                "feature_columns": lag_cols,
+                "feature_columns": feature_cols,
+                "feature_set": "lag_time_v1",
                 "target_column": TARGET_COLUMN,
                 "n_train_samples": int(len(train_df)),
                 "train_seconds": train_elapsed,

@@ -327,15 +327,16 @@ def run_forecast_rollout(
     if horizon_steps is None:
         horizon_steps = HORIZON_STEPS
 
+    window_end_time = pd.to_datetime(anchors_df["window_end_time"].values)
+
     predictions = recursive_rollout_predict(
         model,
         initial_windows,
         horizon_steps=horizon_steps,
+        anchor_time=window_end_time,
         damping_rate=damping_rate,
         damping_cap=damping_cap,
     )  # shape (n_pixel, horizon_steps)
-
-    window_end_time = pd.to_datetime(anchors_df["window_end_time"].values)
     n_pixel = len(anchors_df)
     steps = np.arange(1, horizon_steps + 1)
 

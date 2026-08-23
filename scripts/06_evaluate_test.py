@@ -239,6 +239,7 @@ def main():
                 model,
                 windows,
                 horizon_steps=horizon_steps,
+                anchor_time=anchor_time,
                 damping_rate=damping_rate,
                 damping_cap=damping_cap,
             )

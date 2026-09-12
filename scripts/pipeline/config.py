@@ -598,7 +598,7 @@ class Config:
 
     # Prioritas evaluasi untuk pemilihan model production.
     INFERENCE_PRIORITY_STEP_RANGE = (
-        12,
+        1,
         18,
     )
 
